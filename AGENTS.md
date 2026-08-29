@@ -30,7 +30,7 @@ A [pi coding agent](https://github.com/earendil-works/pi-mono) extension that su
 - Editing `package.json` dependencies requires regenerating the lockfile in the same commit.
 - `gh pr checks` emits `pass`/`fail`; `gh run view` emits `success`/`failure`.
 - npm publish is OIDC trusted publishing: `actions/setup-node` + `registry-url`, then `npm publish --access public` with no `NODE_AUTH_TOKEN`. The trusted publisher is `frederick-wang/pi-openai-codex-usage` workflow `release.yml`, no GitHub Environment. pnpm/setup alone yields ENEEDAUTH. `repository.url` must use the `git+https://` form. An anonymous PUT is **404**, not 401.
-- Reader-facing text carries no maintainer meta-notes; the zh README is written as Chinese a Chinese engineer would write.
+- Reader-facing text carries no maintainer meta-notes; the zh README is written as Chinese a Chinese engineer would write. **Zh copy vocabulary (translationese bans):** 额度 not 额度余额; 支出上限 not 消费控制; 用量重置次数 not 复位信用 (glossary term stays in CONTEXT.md only); 主时段/副时段 not 主窗口/副窗口; 「用掉/使用」not 「消耗」 for redeeming a reset; no 运行时/存储凭据 phrasing in user-visible text (say 当前账户与 pi 保存的账户).
 
 ## Agent skills
 
