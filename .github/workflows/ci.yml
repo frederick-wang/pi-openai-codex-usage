@@ -24,3 +24,5 @@ jobs:
           cache: true
       - run: pnpm run typecheck
       - run: pnpm test
+      - name: Verify tarball file list (gate)
+        run: node scripts/check-pack.mjs

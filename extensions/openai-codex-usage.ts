@@ -250,7 +250,7 @@ function normalizeSpendControl(raw: unknown): SpendControl | undefined {
 		if (used) next.used = used;
 		if (remainingPercent !== undefined) next.remainingPercent = remainingPercent;
 		if (resetsAt !== undefined) next.resetsAt = resetsAt;
-		out.individualLimit = next;
+		if (Object.keys(next).length > 0) out.individualLimit = next;
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -806,7 +806,9 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		fullResetDesc: () => "Reset your current usage limits.",
 		spendControl: () => "Spend control",
 		spendReached: () => "reached",
-		spendLimit: (v) => `limit ${v.limit ?? "?"} · used ${v.used ?? "?"} · ${v.remainingPercent ?? "?"}% remaining`,
+		spendLimitLimit: (v) => `limit ${v.limit}`,
+		spendLimitUsed: (v) => `used ${v.used}`,
+		spendLimitRemaining: (v) => `${v.pct}% remaining`,
 		warnings: () => "Warnings",
 		windowPrimary: () => "Primary",
 		windowSecondary: () => "Secondary",
@@ -874,7 +876,9 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		fullResetDesc: () => "重置当前用量限制。",
 		spendControl: () => "支出上限",
 		spendReached: () => "已到上限",
-		spendLimit: (v) => `上限 ${v.limit ?? "?"} · 已用 ${v.used ?? "?"} · 剩余 ${v.remainingPercent ?? "?"}%`,
+		spendLimitLimit: (v) => `上限 ${v.limit}`,
+		spendLimitUsed: (v) => `已用 ${v.used}`,
+		spendLimitRemaining: (v) => `剩余 ${v.pct}%`,
 		warnings: () => "提示",
 		windowPrimary: () => "主时段",
 		windowSecondary: () => "副时段",
@@ -895,7 +899,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		consumeEmpty: () => "现在没有可用的用量重置。",
 		consumeConfirm: (v) => `确认用掉“${v.title}”${v.expiry ? `（${v.expiry} 过期）` : ""}？用掉就没了。`,
 		consumeCancelled: () => "已取消。",
-		consumeReset: (v) => `重置成功，${v.windows} 个窗口已重置。`,
+		consumeReset: (v) => `重置成功，${v.windows} 个时段已重置。`,
 		consumeNothing: () => "现在的用量不需要重置。",
 		consumeNoCredit: () => "没有可用的用量重置。",
 		consumeAlready: () => "这次重置之前已经用掉了。",
@@ -918,6 +922,17 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 };
 
 export type MsgKey = keyof typeof MESSAGES.en;
+
+/** Test hook: en/zh catalog key parity (silent en fallback must never hide drift). */
+export function catalogKeyDiff(): { zhMissing: string[]; enMissing: string[]; orphanKeys: string[] } {
+	const enKeys = Object.keys(MESSAGES.en);
+	const zhKeys = Object.keys(MESSAGES.zh);
+	return {
+		zhMissing: enKeys.filter((k) => !(k in MESSAGES.zh)),
+		enMissing: zhKeys.filter((k) => !(k in MESSAGES.en)),
+		orphanKeys: Object.keys(MESSAGES.zh).filter((k) => !enKeys.includes(k)),
+	};
+}
 
 export function msg(lang: Lang, key: MsgKey, vars: MsgVars = {}): string {
 	const fn = MESSAGES[lang][key] ?? MESSAGES.en[key];
@@ -1350,7 +1365,6 @@ export function renderFooter(snapshot: Snapshot, opts: FooterOpts): string {
 	const bucket = opts.activeBucket ?? snapshot.buckets[0] ?? { limitId: "codex" };
 	const label = compactBucketLabel(bucket);
 	const segs: string[] = [];
-	const shown = snapshot.buckets.find((b) => b.limitId === bucket.limitId) ?? bucket;
 	const shownBucket: LimitBucket = (bucketsLookup(snapshot, bucket.limitId)) ?? { limitId: bucket.limitId };
 	const windows: Array<{ w: UsageWindow | undefined; fallback: string }> = [
 		{ w: shownBucket.primary, fallback: msg(lang, "windowPrimary") },
@@ -1411,7 +1425,7 @@ export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: 
 	}
 	const credits = snapshot.credits ?? snapshot.buckets[0]?.credits;
 	if (credits) {
-		const value = !credits.hasCredits ? msg(opts.lang, "creditsNone")
+		const value = credits.hasCredits === false ? msg(opts.lang, "creditsNone")
 			: credits.unlimited ? msg(opts.lang, "creditsUnlimited")
 			: credits.balance?.trim() ? credits.balance
 			: msg(opts.lang, "creditsAvailable");
@@ -1430,7 +1444,13 @@ export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: 
 	if (sc && (sc.reached === true || sc.individualLimit)) {
 		const bits: string[] = [];
 		if (sc.reached === true) bits.push(msg(opts.lang, "spendReached"));
-		if (sc.individualLimit) bits.push(msg(opts.lang, "spendLimit", { limit: sc.individualLimit.limit ?? "", used: sc.individualLimit.used ?? "", remainingPercent: sc.individualLimit.remainingPercent ?? "" }));
+		if (sc.individualLimit) {
+			const limitBits: string[] = [];
+			if (sc.individualLimit.limit !== undefined) limitBits.push(msg(opts.lang, "spendLimitLimit", { limit: sc.individualLimit.limit }));
+			if (sc.individualLimit.used !== undefined) limitBits.push(msg(opts.lang, "spendLimitUsed", { used: sc.individualLimit.used }));
+			if (sc.individualLimit.remainingPercent !== undefined) limitBits.push(msg(opts.lang, "spendLimitRemaining", { pct: sc.individualLimit.remainingPercent }));
+			if (limitBits.length > 0) bits.push(limitBits.join(" · "));
+		}
 		if (bits.length > 0) lines.push(`  ${msg(opts.lang, "spendControl")}: ${bits.join(" · ")}`);
 	}
 	if (snapshot.warnings.length > 0) {

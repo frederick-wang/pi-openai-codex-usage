@@ -51,5 +51,5 @@ Reset credits can be consumed from the report: the flow verifies the account ide
 ## Notes
 
 - Window labels are derived from the server-reported durations (`5h`, `7d`, …) and can change; they are never hardcoded.
-- The usage endpoint is fetched on activation, after settled runs, on a gentle heartbeat, and on command — not on a fixed busy poll.
+- The usage endpoint is fetched on activation, after settled runs, every 5 minutes while active, and on command — not on a fixed busy poll.
 - Where a window is absent from the server response it renders as `n/a`, never as a fake zero.

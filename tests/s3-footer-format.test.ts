@@ -201,3 +201,10 @@ test("report: credits none when hasCredits is false; spend control hidden when o
 	assert.match(shown, /Spend control: reached · limit 100 · used 40 · 60% remaining/);
 });
 
+
+test("catalog: en and zh key sets are identical (no silent fallback)", async () => {
+	const mod = await import("../extensions/openai-codex-usage.ts");
+	// Reaching into the catalog: exported via a helper below.
+	const diff = mod.catalogKeyDiff();
+	assert.deepEqual(diff, { zhMissing: [], enMissing: [], orphanKeys: [] });
+});

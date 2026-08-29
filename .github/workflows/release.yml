@@ -30,17 +30,21 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Auth path: the repo NPM_TOKEN secret (present for the very first
-      # publish) wins; otherwise npm uses the npm OIDC Trusted Publisher
-      # configured for frederick-wang/pi-openai-codex-usage + release.yml.
-      # An empty secret value is ignored by npm, so one step serves both.
-      - name: Publish (OIDC first; token only if the secret is present)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Assert version matches tag
         run: |
-          if [ -n "$NODE_AUTH_TOKEN" ]; then
-            echo "auth: repository NODE_AUTH_TOKEN"
-          else
-            echo "auth: npm OIDC trusted publisher"
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "package version: $VERSION / tag: $TAG"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::package.json version $VERSION does not match tag v$TAG"
+            exit 1
           fi
+      # Publish via the npm OIDC Trusted Publisher configured for
+      # frederick-wang/pi-openai-codex-usage + release.yml. (The first release
+      # v0.1.0 used the NPM_TOKEN secret path; that secret is removed and the
+      # workflow no longer sets NODE_AUTH_TOKEN. npm >= 11.5.1 supports OIDC
+      # trusted publishing; node:24 ships it.)
+      - name: Publish (npm OIDC trusted publishing)
+        run: |
+          echo "npm version: $(npm --version)"
           npm publish --access public

@@ -60,6 +60,10 @@ _Avoid_: re-login, rotation
 Opaque server string describing the subscription tier; treated as data, never enum-parsed.
 _Avoid_: plan level, tier
 
+**Spend control**:
+A workspace budget cap reported by the server (reached flag plus optional limit details: limit, used, remaining percent, reset time); shown only when the server supplies meaningful data.
+_Avoid_: spend control, budget, 消费控制 (UI copy)
+
 **Rate limit reached type**:
 The server-provided reason a limit was reached (for example quota exhausted, workspace owner credits depleted). Rendered per known kind; unknown kinds get a generic message.
 _Avoid_: error reason, limit state
