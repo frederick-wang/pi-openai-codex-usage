@@ -25,12 +25,12 @@ A [pi coding agent](https://github.com/earendil-works/pi-mono) extension that su
 - **Window labels are dynamic (ADR-0006):** derive from the server duration; `primary`/`secondary` are wire slots, never semantic names; missing windows render `n/a`, never fake `0%`.
 - **Reached-ness (ADR-0001/consensus):** key UX off `rate_limit_reached_type` (opaque string, kind-aware copy; unknown kinds get the generic message); `allowed`/`limitReached` are wire passthrough hints only.
 - Refresh model (ADR-0005): activation + model_select + `agent_settled` debounced ≥60s (+`agent_end`) + 5-minute heartbeat while active + one-shot after `resetsAt` (exhausted state) + Retry-After one-shot. Countdown redraw is local only; never resolves auth or fetches.
-- Before any release: install the packed tarball into a throwaway project and run it under real `pi` once. Live-check (`scripts/live-check.ts`) is user-consented (one read-only `GET /wham/usage`); never in CI.
+- Before any release: install the packed tarball into a throwaway project and run it under real `pi` once. Live-check (`scripts/live-check.ts`) is user-consented (one read-only `GET /wham/usage`); never in CI. **After a tarball smoke test, uninstall the throwaway install (`pi uninstall <path>`) and delete the throwaway dir — a leftover path install registers duplicate slash commands for the real npm package in every session (repasted `codex-usage:1`/`codex-usage:2`).**
 - pnpm 11 build policy: `pnpm-workspace.yaml` `allowBuilds` with `true`/`false` values (v10 names are ignored; `block` is invalid).
 - Editing `package.json` dependencies requires regenerating the lockfile in the same commit.
 - `gh pr checks` emits `pass`/`fail`; `gh run view` emits `success`/`failure`.
 - npm publish is OIDC trusted publishing: `actions/setup-node` + `registry-url`, then `npm publish --access public` with no `NODE_AUTH_TOKEN`. The trusted publisher is `frederick-wang/pi-openai-codex-usage` workflow `release.yml`, no GitHub Environment. pnpm/setup alone yields ENEEDAUTH. `repository.url` must use the `git+https://` form. An anonymous PUT is **404**, not 401.
-- Reader-facing text carries no maintainer meta-notes; the zh README is written as Chinese a Chinese engineer would write.
+- Reader-facing text carries no maintainer meta-notes; the zh README is written as Chinese a Chinese engineer would write. **Zh copy vocabulary (translationese bans):** 额度 not 额度余额; 支出上限 not 消费控制; 用量重置次数 not 复位信用 (glossary term stays in CONTEXT.md only); 主时段/副时段 not 主窗口/副窗口; 「用掉/使用」not 「消耗」 for redeeming a reset; no 运行时/存储凭据 phrasing in user-visible text (say 当前账户与 pi 保存的账户).
 
 ## Agent skills
 

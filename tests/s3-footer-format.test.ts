@@ -191,3 +191,20 @@ test("renderFooter: follows the active bucket (spark model shows spark)", () => 
 	assert.match(codex, /^codex /);
 	assert.match(codex, /5h █/);
 });
+
+test("report: credits none when hasCredits is false; spend control hidden when only reached=false", () => {
+	const s = snapshot({ buckets: [{ limitId: "codex", primary: { usedPercent: 1 } }], credits: { hasCredits: false, unlimited: false, balance: "0.00" }, spendControl: { reached: false } });
+	const text = buildReportLines(s, { now, lang: "en" }).join("\n");
+	assert.match(text, /Credits: none/);
+	assert.equal(text.includes("Spend control"), false);
+	const shown = buildReportLines(snapshot({ buckets: [{ limitId: "codex", primary: { usedPercent: 1 } }], spendControl: { reached: true, individualLimit: { limit: "100", used: "40", remainingPercent: 60 } } }), { now, lang: "en" }).join("\n");
+	assert.match(shown, /Spend control: reached · limit 100 · used 40 · 60% remaining/);
+});
+
+
+test("catalog: en and zh key sets are identical (no silent fallback)", async () => {
+	const mod = await import("../extensions/openai-codex-usage.ts");
+	// Reaching into the catalog: exported via a helper below.
+	const diff = mod.catalogKeyDiff();
+	assert.deepEqual(diff, { zhMissing: [], enMissing: [], orphanKeys: [] });
+});
