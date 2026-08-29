@@ -5,46 +5,51 @@
  *
  * Runs ONE read-only GET /wham/usage with the user's own pi credential
  * (explicitly consented; never runs in CI; no writes, no refresh, no consume).
+ * Credentials are read through Pi's public surface only (ADR-0007).
  * Prints a redacted summary. Never prints the token or the account id.
  */
 
-import * as nodeFs from "node:fs";
-import * as nodeOs from "node:os";
-import { buildPiUserAgent, createUsageClient, piAgentDir } from "../extensions/openai-codex-usage.ts";
+import { buildPiUserAgent, createUsageClient, extractAccountIdFromJwt } from "../extensions/openai-codex-usage.ts";
 
-const configDir = piAgentDir(process.env as Record<string, string | undefined>, nodeOs.homedir());
-const authPath = `${configDir}/auth.json`;
-
-let token: string | undefined;
-let accountId: string | undefined;
-try {
-	const raw = nodeFs.readFileSync(authPath, "utf8");
-	const parsed = JSON.parse(raw) as Record<string, unknown>;
-	const entry = parsed["openai-codex"];
-	const e = entry as { type?: string; access?: string; accountId?: string } | undefined;
-	if (e?.type === "oauth" && typeof e.access === "string") {
-		token = e.access;
-		if (typeof e.accountId === "string") accountId = e.accountId;
+async function resolveCredential(): Promise<{ token: string; accountId?: string } | undefined> {
+	// Preferred: Pi's public credential reader.
+	try {
+		const mod = (await import("@earendil-works/pi-coding-agent")) as {
+			readStoredCredential?: (providerId: string) => { type?: string; access?: string; accountId?: string } | undefined;
+		};
+		const cred = mod.readStoredCredential?.("openai-codex");
+		if (cred?.type === "oauth" && typeof cred.access === "string") {
+			return { token: cred.access, accountId: cred.accountId };
+		}
+	} catch {
+		// fall through to CLI
 	}
-} catch {
-	token = undefined;
+	// Fallback: `pi auth print-bearer-token` (Pi-owned path, no file parsing here).
+	try {
+		const { execFileSync } = await import("node:child_process");
+		const token = execFileSync("pi", ["auth", "print-bearer-token", "--provider", "openai-codex"], { encoding: "utf8" }).trim();
+		if (token) return { token, accountId: extractAccountIdFromJwt(token) };
+	} catch {
+		return undefined;
+	}
+	return undefined;
 }
 
-console.log(`config dir : ${configDir}`);
-if (!token) {
+const cred = await resolveCredential();
+if (!cred) {
 	console.log("token      : missing (run /login and pick OpenAI Codex)");
 	process.exit(1);
 }
-console.log(`token      : length ${token.length} (not printed)`);
+console.log(`token      : length ${cred.token.length} (not printed)`);
 
 const client = createUsageClient({ fetchImpl: fetch, userAgent: buildPiUserAgent() });
-const result = await client.fetchSnapshot(token, accountId ?? "", undefined);
+const result = await client.fetchSnapshot(cred.token, cred.accountId ?? "", undefined);
 
 if (result.status === "ok") {
 	const s = result.snapshot;
 	console.log(`plan       : ${s.planType ?? "?"}`);
 	console.log(`source     : ${s.source}`);
-	console.log(`freshness  : ${new Date(s.capturedAt).toISOString()}`);
+	console.log(`capturedAt : ${new Date(s.capturedAt).toISOString()}`);
 	if (s.rateLimitReachedType) console.log(`reached    : ${s.rateLimitReachedType}`);
 	console.log(`credits    : ${formatCredits(s.credits ?? s.buckets[0]?.credits)}`);
 	console.log(`reset rc   : ${s.resetCredits?.availableCount ?? "—"}`);

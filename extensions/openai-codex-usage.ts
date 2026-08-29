@@ -617,7 +617,6 @@ export function createUsageClient(deps: {
 	const breakerSuspendMs = deps.breakerSuspendMs ?? BREAKER_SUSPEND_MS;
 	let consecutiveHardFailures = 0;
 	let breakerUntil = 0;
-	let lastBackoff = 0;
 
 	async function doFetch(token: string, accountId: string, signal: AbortSignal | undefined): Promise<UsageResult> {
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -664,12 +663,10 @@ export function createUsageClient(deps: {
 				const resetsAt = parseBodyResetsAt(body);
 				if (resetsAt !== undefined) wait = Math.max(1_000, Math.round(resetsAt - now() / MILLIS_PER_SECOND) * MILLIS_PER_SECOND);
 			}
-			lastBackoff = Math.min(Math.max(1_000, lastBackoff * 2), BACKOFF_CAP_MS);
 			return { status: "retry", retryAfterMs: wait };
 		}
 		if (response.status >= 500) {
 			consecutiveHardFailures += 1;
-			lastBackoff = Math.min(Math.max(1_000, lastBackoff * 2), BACKOFF_CAP_MS);
 			return { status: "error", code: "transient", message: `usage endpoint failed (${response.status})` };
 		}
 		if (!response.ok) {
@@ -695,7 +692,6 @@ export function createUsageClient(deps: {
 			return { status: "error", code: "parse", message: "usage endpoint returned an unexpected shape" };
 		}
 		consecutiveHardFailures = 0;
-		lastBackoff = 0;
 		return { status: "ok", snapshot };
 	}
 
@@ -750,7 +746,6 @@ export function createUsageClient(deps: {
 		resetBreaker() {
 			consecutiveHardFailures = 0;
 			breakerUntil = 0;
-			lastBackoff = 0;
 		},
 	};
 }
@@ -787,7 +782,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 	en: {
 		reportTitle: () => "OpenAI Codex Usage",
 		visitPage: () => `Visit ${SETTINGS_PAGE_URL} for up-to-date information`,
-		pressClose: () => "Press Enter, Esc, or Ctrl+C to close · ↑↓ scroll · r refresh",
+		pressClose: () => "Press Enter, Esc, or Ctrl+C to close · ↑↓ scroll",
 		pressCloseShort: () => "Esc to close",
 		scrollStatus: (v) => `${v.pos}/${v.total} lines · ↑↓ scroll · Enter closes`,
 		plan: (v) => `plan: ${v.plan}`,
@@ -827,6 +822,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		rateLimitedNotify: () => "pi-openai-codex-usage: the usage endpoint is rate-limiting; retry shortly.",
 		retryLater: () => "pi-openai-codex-usage: usage endpoint suspended after repeated failures; retrying later.",
 		jsonModeRestricted: () => "pi-openai-codex-usage: --json requires TUI or print mode.",
+		consumeModeRestricted: () => "pi-openai-codex-usage: consume requires the interactive TUI.",
 		unknownArgs: (v) => `Unknown option: ${v.arg}. Usage: /codex-usage [--json|--refresh|consume]`,
 		consumeTitle: () => "Consume a usage reset",
 		consumeEmpty: () => "No usage limit resets available.",
@@ -856,7 +852,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 	zh: {
 		reportTitle: () => "OpenAI Codex 用量",
 		visitPage: () => `访问 ${SETTINGS_PAGE_URL} 查看最新信息`,
-		pressClose: () => "按 Enter、Esc 或 Ctrl+C 关闭 · ↑↓ 滚动 · r 刷新",
+		pressClose: () => "按 Enter、Esc 或 Ctrl+C 关闭 · ↑↓ 滚动",
 		pressCloseShort: () => "Esc 关闭",
 		scrollStatus: (v) => `第 ${v.pos}/${v.total} 行 · ↑↓ 滚动 · Enter 关闭`,
 		plan: (v) => `套餐：${v.plan}`,
@@ -896,6 +892,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		rateLimitedNotify: () => "pi-openai-codex-usage：用量接口限流中，稍后重试。",
 		retryLater: () => "pi-openai-codex-usage：用量接口连续失败已暂停，稍后重试。",
 		jsonModeRestricted: () => "pi-openai-codex-usage：--json 仅支持 TUI 或 print 模式。",
+		consumeModeRestricted: () => "pi-openai-codex-usage：consume 需要交互式 TUI 才能执行。",
 		unknownArgs: (v) => `未知选项：${v.arg}。用法：/codex-usage [--json|--refresh|consume]`,
 		consumeTitle: () => "消耗一次用量重置",
 		consumeEmpty: () => "当前没有可用的用量重置。",
@@ -1328,6 +1325,10 @@ export function formatReset(resetsAt: number | undefined, now: number, lang: Lan
 	return `${MONTHS[at.getMonth()]}${String(at.getDate()).padStart(2, "0")}`;
 }
 
+function bucketsLookup(snapshot: Snapshot, limitId: string): LimitBucket | undefined {
+	return snapshot.buckets.find((b) => b.limitId === limitId);
+}
+
 /** Compact footer label for a bucket: `codex`, `spark`, or the variant name. */
 export function compactBucketLabel(bucket: Pick<LimitBucket, "limitId" | "limitName">): string {
 	if (normalizedUsageKey(bucket.limitId) === "codex") return "codex";
@@ -1343,17 +1344,21 @@ export interface FooterOpts {
 	stale?: boolean;
 	theme?: FooterTheme;
 	lang?: Lang;
+	activeBucket?: Pick<LimitBucket, "limitId" | "limitName">;
 }
 
 /** GLM-style multi-bar footer for the active bucket: `codex 5h ████░ 43% · 7d ██████ 12% ↻5h 12m`. */
 export function renderFooter(snapshot: Snapshot, opts: FooterOpts): string {
 	const theme = opts.theme ?? identityTheme;
 	const lang = opts.lang ?? "en";
-	const label = compactBucketLabel(snapshot.buckets[0] ?? { limitId: "codex" });
+	const bucket = opts.activeBucket ?? snapshot.buckets[0] ?? { limitId: "codex" };
+	const label = compactBucketLabel(bucket);
 	const segs: string[] = [];
+	const shown = snapshot.buckets.find((b) => b.limitId === bucket.limitId) ?? bucket;
+	const shownBucket: LimitBucket = (bucketsLookup(snapshot, bucket.limitId)) ?? { limitId: bucket.limitId };
 	const windows: Array<{ w: UsageWindow | undefined; fallback: string }> = [
-		{ w: snapshot.buckets[0]?.primary, fallback: msg(lang, "windowPrimary") },
-		{ w: snapshot.buckets[0]?.secondary, fallback: msg(lang, "windowSecondary") },
+		{ w: shownBucket.primary, fallback: msg(lang, "windowPrimary") },
+		{ w: shownBucket.secondary, fallback: msg(lang, "windowSecondary") },
 	];
 	const resetUs = windows
 		.map((x) => x.w?.resetsAt)
@@ -1393,7 +1398,7 @@ export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: 
 	const lines: string[] = [];
 	const age = formatAge(Math.max(0, opts.now - snapshot.capturedAt), opts.lang);
 	lines.push(msg(opts.lang, "plan", { plan: snapshot.planType ?? "?" }));
-	lines.push(`${msg(opts.lang, "updatedAgo", { age })}${opts.stale ? ` (${msg(opts.lang, "nA")? "~":"~"})` : ""} · ${msg(opts.lang, "source", { source: snapshot.source === "api" ? "API" : "headers" })}`);
+	lines.push(`${msg(opts.lang, "updatedAgo", { age })}${opts.stale ? " (~)" : ""} · ${msg(opts.lang, "source", { source: snapshot.source === "api" ? "API" : "headers" })}`);
 	for (const bucket of snapshot.buckets) {
 		const label = bucket.limitName ?? bucket.limitId;
 		const wins: Array<{ w: UsageWindow | undefined; fallback: string }> = [
@@ -1567,9 +1572,9 @@ export function parseRateLimitHeaders(headers: Record<string, string>, now = Dat
 		if (codex) codex.credits = credits;
 		else buckets.push({ limitId: "codex", credits });
 	}
-	const promo = map.get("x-codex-promo-message")?.trim();
-	const planType = map.get("x-codex-plan-type")?.trim();
-	const reached = map.get("x-codex-rate-limit-reached-type")?.trim();
+	const promo = sanitizeDisplayText(map.get("x-codex-promo-message") ?? "");
+	const planType = sanitizeDisplayText(map.get("x-codex-plan-type") ?? "");
+	const reached = sanitizeDisplayText(map.get("x-codex-rate-limit-reached-type") ?? "");
 	const out: HeaderUpdate = { buckets };
 	if (promo) out.promoMessage = promo;
 	if (planType) out.planType = planType;
@@ -1828,8 +1833,8 @@ export interface UiLike {
 		factory: (tui: unknown, theme: FooterTheme, kb: KeyLike, done: (value: unknown) => void) => OverlayComponent,
 		options?: { overlay?: boolean; overlayOptions?: { maxHeight?: string | number } },
 	): Promise<unknown>;
-	select?(opts: { message: string; options: Array<{ id: string; label: string; description?: string }> }): Promise<{ id: string } | undefined>;
-	confirm?(opts: { message: string }): Promise<boolean>;
+	select?(title: string, options: string[], opts?: unknown): Promise<string | undefined>;
+	confirm?(title: string, message: string, opts?: unknown): Promise<boolean>;
 }
 
 export interface ExtensionDeps {
@@ -1868,8 +1873,10 @@ interface ExtensionState {
 	generation: number;
 	consecutiveFailures: number;
 	lastOkFetchAt: number;
-	zeroLatch: { limitId: string; firstSeenAt: number } | null;
+	zeroLatch: Map<string, number> | null;
 	resetOneShot: TimerHandle | null;
+	lastError: string | null;
+	lastResetKey: string | null;
 	alertState: AlertStateV1 | null;
 	lastCtx: CtxLike | null;
 	resetInventory: ResetCreditInventory | null;
@@ -1900,6 +1907,8 @@ export function createExtension(deps: ExtensionDeps) {
 			lastOkFetchAt: 0,
 			zeroLatch: null,
 			resetOneShot: null,
+			lastError: null,
+			lastResetKey: null,
 			alertState: null,
 			lastCtx: null,
 			resetInventory: null,
@@ -1913,11 +1922,14 @@ export function createExtension(deps: ExtensionDeps) {
 		let heartbeatTimer: TimerHandle | null = null;
 		let countdownTimer: TimerHandle | null = null;
 		let debounceTimer: TimerHandle | null = null;
+		let retryOneShot: TimerHandle | null = null;
 
 		const clearTimers = () => {
 			if (heartbeatTimer) { clearIntervalImpl(heartbeatTimer as never); heartbeatTimer = null; }
 			if (countdownTimer) { clearIntervalImpl(countdownTimer as never); countdownTimer = null; }
 			if (debounceTimer) { clearTimeoutImpl(debounceTimer as never); debounceTimer = null; }
+			if (retryOneShot) { clearTimeoutImpl(retryOneShot as never); retryOneShot = null; }
+			if (retryOneShot) { clearTimeoutImpl(retryOneShot as never); retryOneShot = null; }
 			if (s.resetOneShot) { clearTimeoutImpl(s.resetOneShot); s.resetOneShot = null; }
 		};
 
@@ -1933,10 +1945,11 @@ export function createExtension(deps: ExtensionDeps) {
 			if (s.authInvalid) return `${uiLabel} ${uiThemed("authError")}`;
 			if (!s.snapshot) {
 				if (now() < s.retryDeadline) return `${uiLabel} ${uiThemed("rateLimited")}`;
+				if (s.lastError) return `${uiLabel} ${uiThemed("error")}`;
 				return uiThemed("loadingState");
 			}
 			if (s.stale && now() - s.lastOkFetchAt > STALE_HARD_MS) return `${uiLabel} ${uiThemed("error")}`;
-			return renderFooter(s.snapshot, { now: now(), stale: s.stale, theme: undefined, lang });
+			return renderFooter(s.snapshot, { now: now(), stale: s.stale, lang, activeBucket: selectActiveBucket(s.snapshot.buckets, s.lastCtx?.model ?? undefined) });
 		}
 
 		function uiThemed(kind: "authError" | "rateLimited" | "error" | "loadingState"): string {
@@ -1973,6 +1986,16 @@ export function createExtension(deps: ExtensionDeps) {
 			countdownTimer.unref?.();
 		};
 
+		const scheduleRetryOneShot = (ctx: CtxLike) => {
+			if (retryOneShot) return;
+			const delay = Math.max(1_000, s.retryDeadline - now());
+			retryOneShot = setTimeoutImpl(() => {
+				retryOneShot = null;
+				if (s.active && isInteractive(ctx)) void refresh(ctx, false);
+			}, delay) as TimerHandle;
+			retryOneShot.unref?.();
+		};
+
 		const scheduleDebouncedRefresh = (ctx: CtxLike) => {
 			if (debounceTimer) return;
 			debounceTimer = setTimeoutImpl(() => {
@@ -1991,9 +2014,12 @@ export function createExtension(deps: ExtensionDeps) {
 			if (!reached && !exhausted) return;
 			const resetsAt = windows.map((w) => w?.resetsAt).filter((v): v is number => v !== undefined).sort((a, b) => a - b)[0];
 			if (resetsAt === undefined) return;
+			const key = `${bucket?.limitId ?? "codex"}:${resetsAt}`;
+			if (s.lastResetKey === key) return; // already fired for this reset instant
 			const delay = Math.max(1_000, resetsAt * 1_000 - now() + RESET_ONESHOT_SKEW_MS);
 			s.resetOneShot = setTimeoutImpl(() => {
 				s.resetOneShot = null;
+				s.lastResetKey = key;
 				if (s.active && s.lastCtx) void refresh(s.lastCtx, true);
 			}, delay) as TimerHandle;
 			s.resetOneShot.unref?.();
@@ -2001,21 +2027,34 @@ export function createExtension(deps: ExtensionDeps) {
 
 		function applySnapshot(next: Snapshot, ctx: CtxLike): void {
 			const prev = s.snapshot;
-			// Provisional-zero guard: only on a non-zero → all-zero transition.
-			const prevAllZero = prev === null || prev.buckets.every((b) => !b.primary && !b.secondary) || prev.buckets.every((b) => (b.primary?.usedPercent ?? 0) === 0 && (b.secondary?.usedPercent ?? 0) === 0);
-			const nextAllZero = next.buckets.every((b) => !b.primary && !b.secondary) || next.buckets.every((b) => (b.primary?.usedPercent ?? 0) === 0 && (b.secondary?.usedPercent ?? 0) === 0);
-			if (nextAllZero && !prevAllZero) {
-				if (!s.zeroLatch) s.zeroLatch = { limitId: next.buckets[0]?.limitId ?? "codex", firstSeenAt: now() };
-				if (now() - s.zeroLatch.firstSeenAt < ZERO_LATCH_MS) {
+			// Provisional-zero guard: latch per bucket on a non-zero → zero transition.
+			const newlyZeroed: string[] = [];
+			for (const pos of ["primary", "secondary"] as const) {
+				for (const [before, after] of [[prev?.buckets ?? [], next.buckets]] as const) {
+					for (const b of after) {
+						const prevB = before.find((x) => x.limitId === b.limitId);
+						const beforePct = prevB?.[ pos ]?.usedPercent;
+						const afterWin = b[pos];
+						if (beforePct !== undefined && beforePct > 0 && afterWin !== undefined && afterWin.usedPercent === 0) {
+							newlyZeroed.push(`${b.limitId}:${pos}`);
+						}
+					}
+				}
+			}
+			if (newlyZeroed.length > 0) {
+				const latches = s.zeroLatch ?? new Map<string, number>();
+				const fresh = newlyZeroed.filter((k) => (latches.get(k) ?? Number.POSITIVE_INFINITY) === Number.POSITIVE_INFINITY);
+				for (const k of fresh) latches.set(k, now());
+				s.zeroLatch = latches;
+				if (fresh.some((k) => now() - (latches.get(k) ?? 0) < ZERO_LATCH_MS)) {
 					const t = setTimeoutImpl(() => {
 						if (s.active) void refresh(ctx, true);
 					}, ZERO_LATCH_RETRY_MS) as TimerHandle;
 					t.unref?.();
 					return; // keep the previous snapshot until the latch resolves
 				}
-				s.zeroLatch = null;
 			}
-			if (!nextAllZero) s.zeroLatch = null;
+			if (newlyZeroed.length === 0) s.zeroLatch = null;
 			s.snapshot = next;
 			s.stale = false;
 			s.lastOkFetchAt = now();
@@ -2034,17 +2073,13 @@ export function createExtension(deps: ExtensionDeps) {
 			if (!force && now() < s.nextAllowedAt) return;
 			s.inFlight = true;
 			const gen = s.generation;
+			let authRetried = false;
 			try {
 				const auth = await deps.authFor(ctx, { requireActiveModel: true, wantToken: true });
 				if (gen !== s.generation) return;
 				if (auth.status !== "ok") {
 					s.authInvalid = auth.status === "auth-error";
-					const wasInvalid = s.authInvalid;
-					if (!wasInvalid && s.snapshot) { s.stale = true; }
-					if (s.snapshot === null) s.authInvalid = auth.status === "auth-error";
-					if (auth.status === "no-auth") { s.authInvalid = false; }
-					scheduleRefreshState(ctx, auth.status);
-					if (s.snapshot !== null && auth.status === "auth-error") { /* keep stale */ }
+					if (s.snapshot) s.stale = true;
 					emitAlerts(ctx, s.snapshot, s.authInvalid);
 					render();
 					return;
@@ -2068,19 +2103,49 @@ export function createExtension(deps: ExtensionDeps) {
 				if (result.status === "ok") {
 					s.retryDeadline = 0;
 					s.authInvalid = false;
+					s.lastError = null;
 					applySnapshot(result.snapshot, ctx);
 					emitAlerts(ctx, result.snapshot, false);
 				} else if (result.status === "retry") {
 					s.retryDeadline = Math.max(s.retryDeadline, now() + result.retryAfterMs);
 					s.nextAllowedAt = Math.max(s.nextAllowedAt, s.retryDeadline);
+					s.lastError = "rate-limit";
 					if (s.snapshot) s.stale = true;
+					scheduleRetryOneShot(ctx);
 				} else {
 					if (result.code === "auth") {
+						// One re-resolution before declaring invalid (PRD story 10).
+						if (!authRetried) {
+							authRetried = true;
+							const retryAuth = await deps.authFor(ctx, { requireActiveModel: true, wantToken: true });
+							if (gen !== s.generation) return;
+							if (retryAuth.status === "ok") {
+								if (retryAuth.switched && s.fingerprint !== accountFingerprint(retryAuth.accountId)) {
+									s.snapshot = null;
+									s.stale = false;
+									s.alertState = null;
+									s.fingerprint = accountFingerprint(retryAuth.accountId);
+								}
+								const retry = await client.fetchSnapshot(retryAuth.token, retryAuth.accountId, ctxSignal(ctx));
+								if (gen !== s.generation) return;
+								if (retry.status === "ok") {
+									s.retryDeadline = 0;
+									s.authInvalid = false;
+									s.lastError = null;
+									applySnapshot(retry.snapshot, ctx);
+									emitAlerts(ctx, retry.snapshot, false);
+									render();
+									return;
+								}
+							}
+						}
 						s.authInvalid = true;
+						s.lastError = "auth";
 						if (s.snapshot) s.stale = true;
 					} else {
 						s.consecutiveFailures += 1;
 						s.nextAllowedAt = now() + Math.min(1_000 * 2 ** Math.min(4, s.consecutiveFailures + 1), 60_000);
+						s.lastError = result.code;
 						if (s.snapshot) s.stale = true;
 					}
 					emitAlerts(ctx, s.snapshot, s.authInvalid);
@@ -2095,27 +2160,14 @@ export function createExtension(deps: ExtensionDeps) {
 				if (s.snapshot) s.stale = true;
 				render();
 			} finally {
-				s.inFlight = false;
+				if (gen === s.generation) s.inFlight = false;
 			}
-		}
-
-		function scheduleRefreshState(ctx: CtxLike, status: AuthResolution["status"]): void {
-			if (status === "no-auth") return;
-			if (status === "auth-error") s.nextAllowedAt = now() + 60_000;
-			// transient backoff drift handled elsewhere
 		}
 
 		function emitAlerts(ctx: CtxLike, snapshot: Snapshot | null, authInvalid: boolean): void {
 			const ui = ctx.ui as UiLike | undefined;
 			if (!ui) return;
-			if (snapshot === null) {
-				if (authInvalid) {
-					const { emitted } = evaluateAlerts(s.alertState, { snapshot: emptySnapshot0(), authInvalid: true });
-					for (const e of emitted) ui.notify(msg(lang, e.messageKey, e.vars ?? {}), "warning");
-				}
-				return;
-			}
-			const { emitted, state } = evaluateAlerts(s.alertState, { snapshot, authInvalid: false });
+			const { emitted, state } = evaluateAlerts(s.alertState, { snapshot: snapshot ?? emptySnapshot0(), authInvalid });
 			s.alertState = state;
 			for (const e of emitted) ui.notify(msg(lang, e.messageKey, e.vars ?? {}), e.kind === "reached" ? "warning" : "error");
 		}
@@ -2136,9 +2188,9 @@ export function createExtension(deps: ExtensionDeps) {
 				return;
 			}
 			if (!isInteractive(ctx)) return;
-			// Restore last snapshot from disk for this account (stale until refresh).
-			if (s.fingerprint === null && s.snapshot === null) {
-				// fingerprint resolved during auth; attempt restore with stored rows:
+			const auth = await deps.authFor(ctx, { requireActiveModel: true, wantToken: false });
+			if (auth.status === "ok" && s.fingerprint === null) {
+				s.fingerprint = accountFingerprint(auth.accountId);
 				tryRestoreSnapshot(ctx);
 			}
 			s.active = true;
@@ -2165,6 +2217,7 @@ export function createExtension(deps: ExtensionDeps) {
 
 		function handleAfterProviderResponse(event: { status: number; headers?: Record<string, string> }, ctx: CtxLike): void {
 			if (!isInteractive(ctx) || !s.active || s.snapshot === null) return;
+			if (ctx.model?.provider !== PROVIDER_ID) return;
 			if (event.status === 429) {
 				const ra = event.headers?.["retry-after"] ?? event.headers?.["Retry-After"];
 				if (typeof ra === "string") {
@@ -2200,7 +2253,10 @@ export function createExtension(deps: ExtensionDeps) {
 			if (!isInteractive(ctx) || !s.active) return;
 			scheduleDebouncedRefresh(ctx);
 		});
-		api.on("agent_end", async () => { /* refresh via agent_settled; countdown continues */ });
+		api.on("agent_end", async (_event, ctx) => {
+			if (!isInteractive(ctx) || !s.active) return;
+			scheduleDebouncedRefresh(ctx);
+		});
 		api.on("after_provider_response", async (event, ctx) => {
 			handleAfterProviderResponse(event as { status: number; headers?: Record<string, string> }, ctx);
 		});
@@ -2228,8 +2284,16 @@ export function createExtension(deps: ExtensionDeps) {
 				if (!ui) return;
 				try {
 					const parsed = parseCommandArgs(args);
+					if (parsed.error) {
+						ui.notify(msg(lang, "unknownArgs", { arg: parsed.error.arg }), "error");
+						return;
+					}
 					if (parsed.mode === "consume") {
 						await consumeFlow(ctx, parsed);
+						return;
+					}
+					if (parsed.json && ctx.mode !== "tui" && ctx.mode !== "print") {
+						ui.notify(msg(lang, "jsonModeRestricted"), "warning");
 						return;
 					}
 					const auth = await deps.authFor(ctx, { requireActiveModel: false, wantToken: true });
@@ -2309,7 +2373,7 @@ export function createExtension(deps: ExtensionDeps) {
 			const ui = ctx.ui as UiLike | undefined;
 			if (!ui) return;
 			if (ctx.mode !== "tui") {
-				ui.notify(msg(lang, "jsonModeRestricted"), "warning");
+				ui.notify(msg(lang, "consumeModeRestricted"), "warning");
 				return;
 			}
 			const auth = await deps.authFor(ctx, { requireActiveModel: false, wantToken: true });
@@ -2334,32 +2398,36 @@ export function createExtension(deps: ExtensionDeps) {
 				ui.notify(msg(lang, "consumeEmpty"), "info");
 				return;
 			}
-			const option = await ui.select?.({
-				message: msg(lang, "consumeTitle"),
-				options: inv.inventory.options.map((o, i) => ({
-					id: String(i),
-					label: o.title,
-					description: `${o.description}${o.expiresAt !== undefined ? ` · ${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })}` : ""}`,
-				})),
-			});
-			if (!option) {
+			const choice = await ui.select?.(
+				msg(lang, "consumeTitle"),
+				inv.inventory.options.map((o) =>
+					`${o.title}${o.expiresAt !== undefined ? ` (${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })})` : ""}`,
+				),
+			);
+			if (choice === undefined || choice === null) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
 			}
-			const chosen = inv.inventory.options[Number(option.id)];
+			const chosen = inv.inventory.options[Number(choice)];
 			if (!chosen) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
 			}
 			// Guard 4: explicit confirmation before POST.
-			const ok = await ui.confirm?.({ message: msg(lang, "consumeConfirm", { title: chosen.title, expiry: chosen.expiresAt !== undefined ? formatReset(chosen.expiresAt, now(), lang) || "" : "" }) });
+			const ok = await ui.confirm?.(msg(lang, "consumeTitle"), msg(lang, "consumeConfirm", { title: chosen.title, expiry: chosen.expiresAt !== undefined ? formatReset(chosen.expiresAt, now(), lang) || "" : "" }));
 			if (!ok) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
 			}
+			// Guards 1+2 re-verified after the dialog: re-resolve and re-check identity.
+			const reAuth = await deps.authFor(ctx, { requireActiveModel: false, wantToken: true });
+			if (reAuth.status !== "ok" || reAuth.accountId !== auth.accountId) {
+				ui.notify(msg(lang, "consumeRestricted"), "warning");
+				return;
+			}
 			// Guard 3: fresh redeem request id per attempt.
 			const redeemId = deps.resetIdFactory?.() ?? cryptoRandomId();
-			const outcome = await client.consumeResetCredit(auth.token, auth.accountId, { redeem_request_id: redeemId, ...(chosen.creditId ? { credit_id: chosen.creditId } : {}) }, ctxSignal(ctx));
+			const outcome = await client.consumeResetCredit(reAuth.token, reAuth.accountId, { redeem_request_id: redeemId, ...(chosen.creditId ? { credit_id: chosen.creditId } : {}) }, ctxSignal(ctx));
 			if (outcome.status !== "ok") {
 				ui.notify(outcome.status === "retry" ? msg(lang, "rateLimitedNotify") : outcome.message || msg(lang, "consumeUnavailable"), "error");
 				return;
@@ -2372,6 +2440,15 @@ export function createExtension(deps: ExtensionDeps) {
 				: outcome.code === "already_redeemed" ? msg(lang, "consumeAlready")
 				: msg(lang, "consumeUnknown");
 			ui.notify(copy, "info");
+			if (reAuth.switched) {
+				const nextFp = accountFingerprint(reAuth.accountId);
+				if (s.fingerprint !== nextFp) {
+					s.snapshot = null;
+					s.stale = false;
+					s.alertState = null;
+					s.fingerprint = nextFp;
+				}
+			}
 			if (s.lastCtx) void refresh(s.lastCtx, true);
 		}
 
@@ -2389,7 +2466,7 @@ export function createExtension(deps: ExtensionDeps) {
 	};
 }
 
-function parseCommandArgs(args: string): { refresh: boolean; json: boolean; mode: "report" | "consume" } {
+function parseCommandArgs(args: string): { refresh: boolean; json: boolean; mode: "report" | "consume"; error?: { arg: string } } {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	let refresh = false;
 	let json = false;
@@ -2398,7 +2475,7 @@ function parseCommandArgs(args: string): { refresh: boolean; json: boolean; mode
 		if (token === "--refresh") refresh = true;
 		else if (token === "--json") json = true;
 		else if (token === "consume") mode = "consume";
-		else throw new Error(`Unknown option: ${token}. Usage: /codex-usage [--json|--refresh|consume]`);
+		else return { refresh: true, json: false, mode: "report", error: { arg: token } };
 	}
 	return { refresh, json, mode };
 }
@@ -2429,10 +2506,10 @@ export function openaiCodexUsageInstall(pi: unknown): void {
 			try { return nodeFs.readFileSync(p, "utf8"); } catch { return null; }
 		},
 		appendFile: (p, text) => {
-			try { nodeFs.appendFileSync(p, text); } catch { /* */ }
+			try { nodeFs.appendFileSync(p, text, { mode: 0o600 }); } catch { /* */ }
 		},
 		writeFile: (p, text) => {
-			try { nodeFs.writeFileSync(p, text); } catch { /* */ }
+			try { nodeFs.writeFileSync(p, text, { mode: 0o600 }); } catch { /* */ }
 		},
 		rename: (from, to) => {
 			try { nodeFs.renameSync(from, to); } catch { /* */ }

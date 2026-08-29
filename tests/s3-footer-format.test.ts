@@ -175,3 +175,19 @@ test("identity bucket type sanity", () => {
 	const b: LimitBucket = { limitId: "codex", primary: { usedPercent: 1 } };
 	assert.equal(b.limitId, "codex");
 });
+
+test("renderFooter: follows the active bucket (spark model shows spark)", () => {
+	const s = snapshot({
+		buckets: [
+			{ limitId: "codex", primary: { usedPercent: 10, windowMinutes: 300 } },
+			{ limitId: "spark", primary: { usedPercent: 40, windowMinutes: 10_080 } },
+		],
+	});
+	const spark = renderFooter(s, { now, theme: identityTheme, activeBucket: { limitId: "spark", limitName: "GPT-5.3 Codex Spark" } });
+	assert.match(spark, /^spark /);
+	assert.match(spark, /7d █/);
+	assert.doesNotMatch(spark, /^codex /);
+	const codex = renderFooter(s, { now, theme: identityTheme, activeBucket: { limitId: "codex" } });
+	assert.match(codex, /^codex /);
+	assert.match(codex, /5h █/);
+});

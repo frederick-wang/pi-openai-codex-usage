@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createExtension, normalizeWhamPayload, type AuthResolution, type SnapshotStoreRow, type SnapshotStoreLike, type UsageClient, type Snapshot } from "../extensions/openai-codex-usage.ts";
+import { accountFingerprint, createExtension, normalizeWhamPayload, type AuthResolution, type SnapshotStoreLike, type UsageClient, type Snapshot } from "../extensions/openai-codex-usage.ts";
 import { fakePi, freshCtx, type OverlayArtifact } from "./helpers.ts";
 
 // ── fake timers with an advanceable clock ──────────────────────────────────
@@ -243,4 +243,88 @@ test("after_provider_response merges headers over an existing snapshot only", as
 	const text = log.status.at(-1)?.text ?? "";
 	assert.match(text, /20%/); // remaining now 20%
 	assert.match(text, /2h/); // header minutes applied
+});
+
+test("review-fix: generation guard — old refresh finally does not clear new inFlight", async () => {
+	const gate: { release: (() => void) | null } = { release: null };
+	const { client, calls } = makeClient({
+		fetchSnapshot: async () => {
+			await new Promise<void>((resolve) => { gate.release = resolve; });
+			return { status: "ok", snapshot: okSnapshot };
+		},
+	});
+	const { pi } = install({ client });
+	const { ctx } = freshCtx("tui", codexModel);
+	await pi.emit("session_start", {}, ctx);
+	await flush(); // first fetch is in-flight (held)
+	await pi.emit("model_select", { model: codexModel }, ctx); // generation++ → new refresh → inFlight blocked
+	await flush();
+	const callsDuringHold = calls.fetch;
+	// release the old request — its finally must NOT clear the new inFlight
+	gate.release?.();
+	await flush();
+	await pi.emit("agent_settled", {}, ctx);
+	await flush();
+	// no concurrency explosion: next scheduled refresh would start only if inFlight cleared
+	assert.ok(calls.fetch <= callsDuringHold + 2, `fetch count ${calls.fetch}`);
+});
+
+test("review-fix: header merge is provider-scoped", async () => {
+	const { client } = makeClient({ fetchSnapshot: async () => ({ status: "ok", snapshot: okSnapshot }) });
+	const { pi } = install({ client });
+	const otherModel = { provider: "xai", id: "grok-4" };
+	const { ctx, log } = freshCtx("tui", codexModel);
+	await pi.emit("session_start", {}, ctx);
+	await flush();
+	const before = log.status.at(-1)?.text;
+	await pi.emit("after_provider_response", { status: 200, headers: { "x-codex-primary-used-percent": "99" } }, { ...ctx, model: otherModel });
+	await flush();
+	assert.equal(log.status.at(-1)?.text, before); // untouched for other providers
+});
+
+test("review-fix: 401 re-resolves auth once and retries", async () => {
+	let authCalls = 0;
+	const client = makeClient({ fetchSnapshot: async () => ({ status: "error", code: "auth", message: "rejected" }) }).client;
+	const { pi } = install({
+		client,
+		auth: async () => {
+			authCalls += 1;
+			return { status: "ok", token: `tok-${authCalls}`, accountId: "acc-1", switched: false };
+		},
+	});
+	const { ctx, log } = freshCtx("tui", codexModel);
+	await pi.emit("session_start", {}, ctx);
+	await flush();
+	assert.ok(authCalls >= 2); // initial + one re-resolution
+	assert.match(log.status.at(-1)?.text ?? "", /auth error/);
+});
+
+test("review-fix: restored snapshot renders stale before the first fetch completes", async () => {
+	const fp = accountFingerprint("acc-1");
+	const row = { t: 1, fingerprint: fp, snapshot: okSnapshot };
+	const store = { append: () => { /* */ }, load: (loadFp: string) => (loadFp === fp ? row : undefined) };
+	const { client } = makeClient({ fetchSnapshot: async () => { await new Promise((r) => setTimeout(r, 50)); return { status: "ok", snapshot: okSnapshot }; } });
+	const { pi } = install({ client, store: store as never });
+	const { ctx, log } = freshCtx("tui", codexModel);
+	await pi.emit("session_start", {}, ctx);
+	await flush();
+	// Before the fetch resolves, the footer shows the restored snapshot as stale.
+	const text = log.status.at(-1)?.text ?? "";
+	assert.match(text, /^codex ~/);
+});
+
+test("review-fix: retry one-shot schedules one refresh after retry-after", async () => {
+	const timers = fakeTimers();
+	let fail = true;
+	const { client, calls } = makeClient({
+		fetchSnapshot: async () => fail ? { status: "retry", retryAfterMs: 120_000 } : { status: "ok", snapshot: okSnapshot },
+	});
+	const { pi } = install({ client, timers });
+	const { ctx } = freshCtx("tui", codexModel);
+	await pi.emit("session_start", {}, ctx);
+	await flush();
+	const before = calls.fetch;
+	timers.advance(121_000);
+	await flush();
+	assert.ok(calls.fetch > before);
 });

@@ -108,12 +108,12 @@ export function freshCtx(mode = "tui", model?: { provider: string; id?: string; 
 				artifact.component = component;
 				return undefined;
 			},
-			select: async (o: { message: string; options: Array<{ id: string; label: string; description?: string }> }) => {
-				log.selectCalls.push({ message: o.message, options: o.options.map((x) => ({ id: x.id, label: x.label })) });
-				return opts.selectId === undefined ? undefined : { id: opts.selectId };
+			select: async (title: string, options: string[]) => {
+				log.selectCalls.push({ message: title, options: options.map((label, i) => ({ id: String(i), label })) });
+				return opts.selectId === undefined ? undefined : String(opts.selectId);
 			},
-			confirm: async (o: { message: string }) => {
-				log.confirmCalls.push({ message: o.message });
+			confirm: async (title: string, message: string) => {
+				log.confirmCalls.push({ message: `${title} / ${message}` });
 				return opts.confirm ?? false;
 			},
 		},
