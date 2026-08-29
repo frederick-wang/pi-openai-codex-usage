@@ -87,6 +87,7 @@ function install(opts: {
 	const pi = fakePi();
 	const authFor = async () => (typeof opts.auth === "function" ? opts.auth({}) : opts.auth ?? { status: "ok", token: "tok.x", accountId: "acc-1", switched: false });
 	createExtension({
+		env: { PI_OPENAI_CODEX_USAGE_LANG: "en" },
 		nowFn: timers.now,
 		setTimeout: timers.setTimeout as never,
 		clearTimeout: timers.clearTimeout as never,
