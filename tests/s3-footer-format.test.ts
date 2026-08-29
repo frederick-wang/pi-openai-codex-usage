@@ -197,5 +197,7 @@ test("report: credits none when hasCredits is false; spend control hidden when o
 	const text = buildReportLines(s, { now, lang: "en" }).join("\n");
 	assert.match(text, /Credits: none/);
 	assert.equal(text.includes("Spend control"), false);
+	const shown = buildReportLines(snapshot({ buckets: [{ limitId: "codex", primary: { usedPercent: 1 } }], spendControl: { reached: true, individualLimit: { limit: "100", used: "40", remainingPercent: 60 } } }), { now, lang: "en" }).join("\n");
+	assert.match(shown, /Spend control: reached · limit 100 · used 40 · 60% remaining/);
 });
 

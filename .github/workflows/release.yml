@@ -30,11 +30,10 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Publishing path: if the repo NPM_TOKEN secret exists it is used
-      # (needed for the first package version); otherwise npm publishes via
-      # the npm OIDC Trusted Publisher configured on the package
-      # (frederick-wang/pi-openai-codex-usage + release.yml). Empty secret
-      # values are ignored by npm, so this step is safe in both modes.
+      # Auth path: the repo NPM_TOKEN secret (present for the very first
+      # publish) wins; otherwise npm uses the npm OIDC Trusted Publisher
+      # configured for frederick-wang/pi-openai-codex-usage + release.yml.
+      # An empty secret value is ignored by npm, so one step serves both.
       - name: Publish (OIDC first; token only if the secret is present)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
