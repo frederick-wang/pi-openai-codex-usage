@@ -25,7 +25,7 @@ A [pi coding agent](https://github.com/earendil-works/pi-mono) extension that su
 - **Window labels are dynamic (ADR-0006):** derive from the server duration; `primary`/`secondary` are wire slots, never semantic names; missing windows render `n/a`, never fake `0%`.
 - **Reached-ness (ADR-0001/consensus):** key UX off `rate_limit_reached_type` (opaque string, kind-aware copy; unknown kinds get the generic message); `allowed`/`limitReached` are wire passthrough hints only.
 - Refresh model (ADR-0005): activation + model_select + `agent_settled` debounced ≥60s (+`agent_end`) + 5-minute heartbeat while active + one-shot after `resetsAt` (exhausted state) + Retry-After one-shot. Countdown redraw is local only; never resolves auth or fetches.
-- Before any release: install the packed tarball into a throwaway project and run it under real `pi` once. Live-check (`scripts/live-check.ts`) is user-consented (one read-only `GET /wham/usage`); never in CI.
+- Before any release: install the packed tarball into a throwaway project and run it under real `pi` once. Live-check (`scripts/live-check.ts`) is user-consented (one read-only `GET /wham/usage`); never in CI. **After a tarball smoke test, uninstall the throwaway install (`pi uninstall <path>`) and delete the throwaway dir — a leftover path install registers duplicate slash commands for the real npm package in every session (repasted `codex-usage:1`/`codex-usage:2`).**
 - pnpm 11 build policy: `pnpm-workspace.yaml` `allowBuilds` with `true`/`false` values (v10 names are ignored; `block` is invalid).
 - Editing `package.json` dependencies requires regenerating the lockfile in the same commit.
 - `gh pr checks` emits `pass`/`fail`; `gh run view` emits `success`/`failure`.
