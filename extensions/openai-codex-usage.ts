@@ -1415,7 +1415,10 @@ export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: 
 	}
 	const credits = snapshot.credits ?? snapshot.buckets[0]?.credits;
 	if (credits) {
-		const value = credits.unlimited ? msg(opts.lang, "creditsUnlimited") : credits.balance?.trim() ? credits.balance : msg(opts.lang, "creditsAvailable");
+		const value = !credits.hasCredits ? msg(opts.lang, "creditsNone")
+			: credits.unlimited ? msg(opts.lang, "creditsUnlimited")
+			: credits.balance?.trim() ? credits.balance
+			: msg(opts.lang, "creditsAvailable");
 		lines.push(`  ${msg(opts.lang, "credits")}: ${value}`);
 	}
 	const rc = snapshot.resetCredits?.availableCount;
@@ -1428,9 +1431,9 @@ export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: 
 		lines.push(`    ${msg(opts.lang, "resetOptionHint")}`);
 	}
 	const sc = snapshot.spendControl;
-	if (sc) {
+	if (sc && (sc.reached === true || sc.individualLimit)) {
 		const bits: string[] = [];
-		if (sc.reached !== undefined) bits.push(sc.reached ? msg(opts.lang, "spendReached") : "—");
+		if (sc.reached === true) bits.push(msg(opts.lang, "spendReached"));
 		if (sc.individualLimit) bits.push(msg(opts.lang, "spendLimit", { limit: sc.individualLimit.limit ?? "", used: sc.individualLimit.used ?? "", remainingPercent: sc.individualLimit.remainingPercent ?? "" }));
 		if (bits.length > 0) lines.push(`  ${msg(opts.lang, "spendControl")}: ${bits.join(" · ")}`);
 	}

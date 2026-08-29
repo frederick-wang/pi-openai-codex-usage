@@ -191,3 +191,11 @@ test("renderFooter: follows the active bucket (spark model shows spark)", () => 
 	assert.match(codex, /^codex /);
 	assert.match(codex, /5h █/);
 });
+
+test("report: credits none when hasCredits is false; spend control hidden when only reached=false", () => {
+	const s = snapshot({ buckets: [{ limitId: "codex", primary: { usedPercent: 1 } }], credits: { hasCredits: false, unlimited: false, balance: "0.00" }, spendControl: { reached: false } });
+	const text = buildReportLines(s, { now, lang: "en" }).join("\n");
+	assert.match(text, /Credits: none/);
+	assert.equal(text.includes("Spend control"), false);
+});
+
