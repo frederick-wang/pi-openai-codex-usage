@@ -116,10 +116,10 @@ export function press(log: ReturnType<typeof freshCtx>["log"], data: string): vo
 }
 
 export function fakeFetch(responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }>) {
-	const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+	const requests: Array<{ url: string; headers: Record<string, string>; fetchInit?: RequestInit }> = [];
 	let cursor = 0;
 	const fn = (url: string | URL, init?: RequestInit) => {
-		requests.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+		requests.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string>, fetchInit: init });
 		const next = responses[Math.min(cursor, responses.length - 1)];
 		cursor += 1;
 		return Promise.resolve(
