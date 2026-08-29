@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tgz
+*.log
+.DS_Store
+# pi extension loader compile output
+extensions/*.js
+scripts/*.js
+tests/*.js

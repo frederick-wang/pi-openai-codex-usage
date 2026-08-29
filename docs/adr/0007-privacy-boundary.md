@@ -1,0 +1,3 @@
+# 0007 — Privacy boundary: no credentials are ever written or leaked
+
+The extension reads credentials only through Pi's own public surface (`getProviderAuth`, `readStoredCredential`), never refreshes OAuth itself, never reads `~/.codex/auth.json`, and never writes any credential file. The account id exists only in memory for switch detection (runtime JWT vs stored credential; mismatch drops all state); it is never logged, rendered, or exported. Persisted snapshots (`~/.pi/agent/pi-openai-codex-usage-snapshots.jsonl`) contain no tokens, no raw headers, no account id — cache keys are an HMAC-SHA256 fingerprint of the account id with a code-local salt. Error messages redact bearer patterns; response bodies are size-capped and strings sanitized before rendering.

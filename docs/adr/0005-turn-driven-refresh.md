@@ -1,0 +1,3 @@
+# 0005 — Turn-driven refresh with a gentle heartbeat, not fixed polling
+
+Refresh happens on activation, on model change, after each settled agent run (debounced ≥60s), and on command. While an `openai-codex` model is active a 5-minute heartbeat catches cross-device changes, plus one-shot refreshes after `resetsAt` (when a limit is exhausted) and after `Retry-After`. Fixed 60-second polling (the competitor norm) is rejected: usage only changes while the user is actually working, so idle polling is ~1440 requests/day of traffic for data that cannot change locally. Countdown redraw is local render-only and never triggers auth resolution or fetches.

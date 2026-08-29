@@ -1,0 +1,5 @@
+# Build policy (pnpm v11): dependencies are reviewed and denied script
+# execution; this tree is type-checking and peer tooling only.
+allowBuilds:
+  "@google/genai": false
+  protobufjs: false

@@ -1,0 +1,44 @@
+{
+  "name": "pi-openai-codex-usage",
+  "version": "0.1.0",
+  "description": "ChatGPT Codex subscription usage in the pi footer — multi-bucket limits, reset credits, consume action, /codex-usage report. Unofficial, not affiliated with OpenAI.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "codex",
+    "openai",
+    "usage",
+    "quota"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frederick-wang/pi-openai-codex-usage.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "extensions",
+    "README.zh-CN.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "@types/node": "^22",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'tests/*.test.ts'",
+    "live-check": "node scripts/live-check.ts"
+  },
+  "packageManager": "pnpm@11.24.0"
+}

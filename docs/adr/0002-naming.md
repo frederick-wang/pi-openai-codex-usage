@@ -1,0 +1,3 @@
+# 0002 — Repo `pi-openai-codex-usage`; package `pi-openai-codex-usage`
+
+The repo lives under `frederick-wang/pi-openai-codex-usage` (GitHub account is the namespace; the ecosystem convention, same as the sibling `pi-xai-usage`). The npm package is unscoped `pi-openai-codex-usage`, matching the repo name. The unscoped name was verified free on the npm registry; the sibling scope (`@zhaoji-wang/…`) is kept for packages where the unscoped name was already taken (e.g. `pi-glm-usage`). If the unscoped name is ever taken at publish time, fall back to the scoped name without renaming the repo — git-based `pi install` distribution is unaffected.
