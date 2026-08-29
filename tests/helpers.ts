@@ -58,18 +58,28 @@ export function stubKb(): { matches(data: string, id: string): boolean } {
 	};
 }
 
-export function freshCtx(mode = "tui", model?: { provider: string; id?: string; baseUrl?: string }) {
+export function freshCtx(mode = "tui", model?: { provider: string; id?: string; name?: string; baseUrl?: string }, opts: { authApiKey?: string; authError?: boolean; selectId?: string; confirm?: boolean } = {}) {
 	const log = {
 		status: [] as Array<{ key: string; text: string | undefined }>,
 		notifications: [] as Array<{ message: string; level: string }>,
 		customCalls: 0,
 		overlay: null as OverlayArtifact | null,
 		stdout: [] as string[],
+		selectCalls: [] as Array<{ message: string; options: Array<{ id: string; label: string }> }>,
+		confirmCalls: [] as Array<{ message: string }>,
 	};
+	const signal = new AbortController().signal;
 	const ctx = {
 		mode,
 		hasUI: mode === "tui" || mode === "rpc",
 		model,
+		signal,
+		modelRegistry: {
+			getProviderAuth: async () => {
+				if (opts.authError) throw new Error("registry boom");
+				return opts.authApiKey === undefined ? undefined : { auth: { apiKey: opts.authApiKey } };
+			},
+		},
 		ui: {
 			setStatus: (key: string, text?: string) => {
 				log.status.push({ key, text });
@@ -98,9 +108,17 @@ export function freshCtx(mode = "tui", model?: { provider: string; id?: string; 
 				artifact.component = component;
 				return undefined;
 			},
+			select: async (o: { message: string; options: Array<{ id: string; label: string; description?: string }> }) => {
+				log.selectCalls.push({ message: o.message, options: o.options.map((x) => ({ id: x.id, label: x.label })) });
+				return opts.selectId === undefined ? undefined : { id: opts.selectId };
+			},
+			confirm: async (o: { message: string }) => {
+				log.confirmCalls.push({ message: o.message });
+				return opts.confirm ?? false;
+			},
 		},
 	};
-	return { ctx, log };
+	return { ctx, log, signal };
 }
 
 export function invokeOverlay(log: ReturnType<typeof freshCtx>["log"], width?: number): string[] {
@@ -123,7 +141,7 @@ export function fakeFetch(responses: Array<{ status: number; body: unknown; head
 		const next = responses[Math.min(cursor, responses.length - 1)];
 		cursor += 1;
 		return Promise.resolve(
-			new Response(JSON.stringify(next.body), {
+			new Response(typeof next.body === "string" ? next.body : JSON.stringify(next.body), {
 				status: next.status,
 				headers: next.headers ?? { "content-type": "application/json" },
 			}),

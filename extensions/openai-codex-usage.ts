@@ -11,6 +11,7 @@
  * CONTEXT.md; decision record lives in docs/adr/.
  */
 import { createHash, createHmac } from "node:crypto";
+import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 
@@ -597,6 +598,8 @@ async function readBoundedBody(response: Response, maxBytes: number, signal: Abo
 	}
 }
 
+export type UsageClient = UsageClientLike & ResetCreditClientLike;
+
 export function createUsageClient(deps: {
 	fetchImpl: typeof fetch;
 	timeoutMs?: number;
@@ -605,7 +608,7 @@ export function createUsageClient(deps: {
 	breakerThreshold?: number;
 	breakerSuspendMs?: number;
 	userAgent?: string;
-}): UsageClientLike {
+}): UsageClient {
 	const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const maxBodyBytes = deps.maxBodyBytes ?? MAX_BODY_BYTES;
 	const now = () => (deps.nowFn ?? Date.now)();
@@ -707,6 +710,43 @@ export function createUsageClient(deps: {
 			}
 			return result;
 		},
+		async listResetCredits(token, accountId, signal) {
+			if (now() < breakerUntil) {
+				return { status: "error", code: "breaker", message: "suspended after repeated failures" };
+			}
+			const { status, text } = await resetRequest(deps.fetchImpl, RESET_CREDITS_URL, undefined, token, accountId, userAgent, timeoutMs, maxBodyBytes, signal);
+			if (status === 401 || status === 403) return { status: "error", code: "auth", message: "reset endpoint rejected the credential" };
+			if (status === 429) {
+				return { status: "retry", retryAfterMs: 60_000 };
+			}
+			if (!text || status >= 500) return { status: "error", code: "transient", message: `reset endpoint failed (${status})` };
+			try {
+				return { status: "ok", inventory: normalizeResetCreditsListPayload(JSON.parse(text)) };
+			} catch {
+				return { status: "error", code: "parse", message: "reset endpoint returned an unexpected shape" };
+			}
+		},
+		async consumeResetCredit(token, accountId, body, signal) {
+			if (now() < breakerUntil) {
+				return { status: "error", code: "breaker", message: "suspended after repeated failures" };
+			}
+			const { status, text } = await resetRequest(deps.fetchImpl, RESET_CONSUME_URL, JSON.stringify(body), token, accountId, userAgent, timeoutMs, maxBodyBytes, signal);
+			if (status === 401 || status === 403) return { status: "error", code: "auth", message: "reset endpoint rejected the credential" };
+			if (status === 429) return { status: "retry", retryAfterMs: 60_000 };
+			if (!text || status >= 500) return { status: "error", code: "transient", message: `reset endpoint failed (${status})` };
+			try {
+				const parsed = JSON.parse(text) as unknown;
+				const obj = asObject(parsed);
+				const code = asString(obj?.code);
+				if (code !== "reset" && code !== "nothing_to_reset" && code !== "no_credit" && code !== "already_redeemed") {
+					return { status: "error", code: "parse", message: "reset endpoint returned an unknown outcome" };
+				}
+				const windowsReset = asNonnegativeInteger(obj?.windows_reset) ?? 0;
+				return { status: "ok", code, windowsReset };
+			} catch {
+				return { status: "error", code: "parse", message: "reset endpoint returned invalid JSON" };
+			}
+		},
 		resetBreaker() {
 			consecutiveHardFailures = 0;
 			breakerUntil = 0;
@@ -728,6 +768,1693 @@ function parseBodyResetsAt(body: string): number | undefined {
 	}
 }
 
-export default function openaiCodexUsage(_pi: unknown): void {
-	// Lifecycle lands in T03.
+// ─────────────────────────────────────────────────────────────────────────────
+// i18n
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Lang = "en" | "zh";
+
+export function resolveLang(env: Record<string, string | undefined>): Lang {
+	const explicit = env["PI_OPENAI_CODEX_USAGE_LANG"];
+	if (explicit === "zh" || explicit === "en") return explicit;
+	const locale = new Intl.DateTimeFormat().resolvedOptions().locale;
+	return locale.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+type MsgVars = Record<string, string | number>;
+
+const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
+	en: {
+		reportTitle: () => "OpenAI Codex Usage",
+		visitPage: () => `Visit ${SETTINGS_PAGE_URL} for up-to-date information`,
+		pressClose: () => "Press Enter, Esc, or Ctrl+C to close · ↑↓ scroll · r refresh",
+		pressCloseShort: () => "Esc to close",
+		scrollStatus: (v) => `${v.pos}/${v.total} lines · ↑↓ scroll · Enter closes`,
+		plan: (v) => `plan: ${v.plan}`,
+		updatedAgo: (v) => `updated ${v.age}`,
+		source: (v) => `source: ${v.source}`,
+		left: () => "left",
+		limitWindow: () => "limit",
+		credits: () => "Credits",
+		creditsUnlimited: () => "unlimited",
+		creditsAvailable: () => "available",
+		creditsNone: () => "none",
+		resetCredits: () => "Usage limit resets",
+		resetCountOne: (v) => `${v.n} available`,
+		resetCountMany: (v) => `${v.n} available`,
+		resetCountNone: () => "none available",
+		resetCountMissing: () => "—",
+		resetOptionHint: () => "Use /codex-usage consume to redeem one.",
+		resetOption: (v) => `${v.title} — ${v.desc}`,
+		resetOptionExpires: (v) => `expires ${v.at}`,
+		fullReset: () => "Full reset",
+		fullResetDesc: () => "Reset your current usage limits.",
+		spendControl: () => "Spend control",
+		spendReached: () => "reached",
+		spendLimit: (v) => `limit ${v.limit ?? "?"} · used ${v.used ?? "?"} · ${v.remainingPercent ?? "?"}% remaining`,
+		warnings: () => "Warnings",
+		windowPrimary: () => "Primary",
+		windowSecondary: () => "Secondary",
+		resetsIn: (v) => `↻${v.t}`,
+		resetNow: () => "reset imminent",
+		nA: () => "n/a",
+		error: () => "error",
+		rateLimited: () => "rate limited",
+		authError: () => "auth error",
+		authNeeded: () => "pi-openai-codex-usage: no OpenAI Codex credential. Run /login and select OpenAI Codex.",
+		authFailed: () => "pi-openai-codex-usage: usage fetch failed (credential rejected).",
+		fetchFailed: () => "pi-openai-codex-usage: usage fetch failed.",
+		rateLimitedNotify: () => "pi-openai-codex-usage: the usage endpoint is rate-limiting; retry shortly.",
+		retryLater: () => "pi-openai-codex-usage: usage endpoint suspended after repeated failures; retrying later.",
+		jsonModeRestricted: () => "pi-openai-codex-usage: --json requires TUI or print mode.",
+		unknownArgs: (v) => `Unknown option: ${v.arg}. Usage: /codex-usage [--json|--refresh|consume]`,
+		consumeTitle: () => "Consume a usage reset",
+		consumeEmpty: () => "No usage limit resets available.",
+		consumeConfirm: (v) => `Consume “${v.title}”${v.expiry ? ` (expires ${v.expiry})` : ""}? This cannot be undone.`,
+		consumeCancelled: () => "Reset cancelled.",
+		consumeReset: (v) => `Usage reset. ${v.windows} window(s) reset.`,
+		consumeNothing: () => "Your usage does not need a reset right now.",
+		consumeNoCredit: () => "No usage limit resets are available.",
+		consumeAlready: () => "Usage reset was already completed.",
+		consumeUnknown: () => "Reset outcome unknown; check the usage page.",
+		consumeRestricted: () => "pi-openai-codex-usage: reset not allowed — the runtime account does not match the stored credential.",
+		consumeConflict: () => "pi-openai-codex-usage: reset not allowed — no unique stored credential matches the runtime account.",
+		consumeUnavailable: () => "pi-openai-codex-usage: reset detail is unavailable for this account.",
+		alertAuthInvalid: () => "pi-openai-codex-usage: OpenAI Codex credential rejected; usage updates paused.",
+		alertReachedUnknown: (v) => `Codex usage limit reached (${v.kind}).`,
+		alertReachedLimit: () => "Codex usage limit reached.",
+		alertReachedOwnerCredits: () => "Workspace owner credits depleted; usage blocked.",
+		alertReachedMemberCredits: () => "Workspace member credits depleted; usage blocked.",
+		alertReachedOwnerUsage: () => "Workspace owner usage limit reached.",
+		alertReachedMemberUsage: () => "Workspace member usage limit reached.",
+		reportSummary: (v) => `Codex usage: ${v.pct}% left`,
+		ageJustNow: () => "just now",
+		ageSec: (v) => `${v.n}s ago`,
+		ageMin: (v) => `${v.n}m ago`,
+		ageHour: (v) => `${v.n}h ago`,
+	},
+	zh: {
+		reportTitle: () => "OpenAI Codex 用量",
+		visitPage: () => `访问 ${SETTINGS_PAGE_URL} 查看最新信息`,
+		pressClose: () => "按 Enter、Esc 或 Ctrl+C 关闭 · ↑↓ 滚动 · r 刷新",
+		pressCloseShort: () => "Esc 关闭",
+		scrollStatus: (v) => `第 ${v.pos}/${v.total} 行 · ↑↓ 滚动 · Enter 关闭`,
+		plan: (v) => `套餐：${v.plan}`,
+		updatedAgo: (v) => `更新于 ${v.age}`,
+		source: (v) => `来源：${v.source}`,
+		left: () => "剩余",
+		limitWindow: () => "限制",
+		credits: () => "额度余额",
+		creditsUnlimited: () => "不限量",
+		creditsAvailable: () => "可用",
+		creditsNone: () => "无",
+		resetCredits: () => "用量重置次数",
+		resetCountOne: (v) => `${v.n} 次可用`,
+		resetCountMany: (v) => `${v.n} 次可用`,
+		resetCountNone: () => "暂无可用",
+		resetCountMissing: () => "—",
+		resetOptionHint: () => "使用 /codex-usage consume 消耗一次。",
+		resetOption: (v) => `${v.title} — ${v.desc}`,
+		resetOptionExpires: (v) => `过期时间 ${v.at}`,
+		fullReset: () => "完整重置",
+		fullResetDesc: () => "重置当前用量限制。",
+		spendControl: () => "消费控制",
+		spendReached: () => "已到上限",
+		spendLimit: (v) => `上限 ${v.limit ?? "?"} · 已用 ${v.used ?? "?"} · 剩余 ${v.remainingPercent ?? "?"}%`,
+		warnings: () => "警告",
+		windowPrimary: () => "主窗口",
+		windowSecondary: () => "副窗口",
+		resetsIn: (v) => `↻${v.t}`,
+		resetNow: () => "即将重置",
+		nA: () => "n/a",
+		error: () => "错误",
+		rateLimited: () => "限流中",
+		authError: () => "认证错误",
+		authNeeded: () => "pi-openai-codex-usage：未找到 OpenAI Codex 凭据。请运行 /login 并选择 OpenAI Codex。",
+		authFailed: () => "pi-openai-codex-usage：用量获取失败（凭据被拒绝）。",
+		fetchFailed: () => "pi-openai-codex-usage：用量获取失败。",
+		rateLimitedNotify: () => "pi-openai-codex-usage：用量接口限流中，稍后重试。",
+		retryLater: () => "pi-openai-codex-usage：用量接口连续失败已暂停，稍后重试。",
+		jsonModeRestricted: () => "pi-openai-codex-usage：--json 仅支持 TUI 或 print 模式。",
+		unknownArgs: (v) => `未知选项：${v.arg}。用法：/codex-usage [--json|--refresh|consume]`,
+		consumeTitle: () => "消耗一次用量重置",
+		consumeEmpty: () => "当前没有可用的用量重置。",
+		consumeConfirm: (v) => `确认消耗“${v.title}”${v.expiry ? `（${v.expiry} 过期）` : ""}？此操作不可撤销。`,
+		consumeCancelled: () => "已取消重置。",
+		consumeReset: (v) => `重置成功，${v.windows} 个窗口已重置。`,
+		consumeNothing: () => "当前用量无需重置。",
+		consumeNoCredit: () => "没有可用的用量重置。",
+		consumeAlready: () => "重置已在此之前完成。",
+		consumeUnknown: () => "重置结果未知，请查看用量页面。",
+		consumeRestricted: () => "pi-openai-codex-usage：不允许重置——运行时账户与存储凭据不一致。",
+		consumeConflict: () => "pi-openai-codex-usage：不允许重置——没有唯一匹配存储凭据的运行时账户。",
+		consumeUnavailable: () => "pi-openai-codex-usage：该账户的复位信用详情不可用。",
+		alertAuthInvalid: () => "pi-openai-codex-usage：OpenAI Codex 凭据被拒绝，用量更新已暂停。",
+		alertReachedUnknown: (v) => `Codex 用量已达上限（${v.kind}）。`,
+		alertReachedLimit: () => "Codex 用量已达上限。",
+		alertReachedOwnerCredits: () => "工作区负责人额度耗尽，用量已阻断。",
+		alertReachedMemberCredits: () => "工作区成员额度耗尽，用量已阻断。",
+		alertReachedOwnerUsage: () => "工作区负责人用量上限已到。",
+		alertReachedMemberUsage: () => "工作区成员用量上限已到。",
+		reportSummary: (v) => `Codex 用量：剩余 ${v.pct}%`,
+		ageJustNow: () => "刚刚",
+		ageSec: (v) => `${v.n} 秒前`,
+		ageMin: (v) => `${v.n} 分钟前`,
+		ageHour: (v) => `${v.n} 小时前`,
+	},
+};
+
+export type MsgKey = keyof typeof MESSAGES.en;
+
+export function msg(lang: Lang, key: MsgKey, vars: MsgVars = {}): string {
+	const fn = MESSAGES[lang][key] ?? MESSAGES.en[key];
+	return fn ? fn(vars) : key;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Terminal text helpers (ported from the pi-xai-usage overlay contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function visualWidth(s: string): number {
+	let w = 0;
+	for (let i = 0; i < s.length; ) {
+		const cp = s.codePointAt(i) ?? 0;
+		if (cp === 0x1b) {
+			i = skipEscape(s, i);
+			continue;
+		}
+		w += isWideChar(cp) ? 2 : 1;
+		i += cp > 0xffff ? 2 : 1;
+	}
+	return w;
+}
+
+function skipEscape(s: string, i: number): number {
+	if (s[i + 1] === "]") {
+		let j = i + 2;
+		while (j < s.length) {
+			const b = s.charCodeAt(j);
+			if (b === 0x07) {
+				j += 1;
+				break;
+			}
+			if (b === 0x1b && s[j + 1] === "\\") {
+				j += 2;
+				break;
+			}
+			j += 1;
+		}
+		return j;
+	}
+	let j = i + 1;
+	while (j < s.length) {
+		const b = s.charCodeAt(j);
+		if (b >= 0x40 && b <= 0x7e && b !== 0x5b && b !== 0x5d) {
+			j += 1;
+			break;
+		}
+		j += 1;
+	}
+	return j;
+}
+
+function isWideChar(cp: number): boolean {
+	return (
+		(cp >= 0x1100 && cp <= 0x115f) ||
+		(cp >= 0x2e80 && cp <= 0xa4cf) ||
+		(cp >= 0xac00 && cp <= 0xd7a3) ||
+		(cp >= 0xf900 && cp <= 0xfaff) ||
+		(cp >= 0xfe30 && cp <= 0xfe4f) ||
+		(cp >= 0xff00 && cp <= 0xff60) ||
+		(cp >= 0xffe0 && cp <= 0xffe6) ||
+		(cp >= 0x1f300 && cp <= 0x1f64f) ||
+		(cp >= 0x1f900 && cp <= 0x1f9ff) ||
+		(cp >= 0x20000 && cp <= 0x3fffd)
+	);
+}
+
+export function wrapLines(lines: string[], width: number): string[] {
+	if (width <= 0) return [...lines];
+	const out: string[] = [];
+	for (const line of lines) {
+		if (visualWidth(line) <= width) {
+			out.push(line);
+			continue;
+		}
+		const tokens = ansiTokens(line);
+		const wrapped: string[] = [];
+		let cur = "";
+		let curW = 0;
+		for (const tok of tokens) {
+			if (tok.ansi) {
+				cur += tok.s;
+				continue;
+			}
+			const cw = isWideChar(tok.cp) ? 2 : 1;
+			if (curW + cw > width && visibleCharCount(cur) > 0) {
+				wrapped.push(cur);
+				cur = cw <= width ? tok.s : "";
+				curW = cw <= width ? cw : 0;
+			} else if (cw > width) {
+				cur = "";
+				curW = 0;
+			} else {
+				cur += tok.s;
+				curW += cw;
+			}
+		}
+		if (cur.length > 0) wrapped.push(cur);
+		const { ansiPrefix } = splitAnsi(line);
+		const styleOnly = ansiPrefix.replace(/\s/g, "");
+		for (let k = 0; k < wrapped.length; k++) {
+			out.push(k === 0 ? wrapped[k] : `${styleOnly}${wrapped[k]}`);
+		}
+	}
+	return out;
+}
+
+function visibleCharCount(s: string): number {
+	let n = 0;
+	let i = 0;
+	while (i < s.length) {
+		if (s[i] === "\x1b") {
+			i = skipEscape(s, i);
+		} else {
+			const cp = s.codePointAt(i) ?? 0;
+			n += 1;
+			i += cp > 0xffff ? 2 : 1;
+		}
+	}
+	return n;
+}
+
+function padToWidth(line: string, width: number): string {
+	const cur = visualWidth(line);
+	return cur >= width ? line : `${line}${String.fromCharCode(32).repeat(width - cur)}`;
+}
+
+function clampChrome(line: string, width: number): string {
+	if (visualWidth(line) <= width) return line;
+	const tokens = ansiTokens(line);
+	let out = "";
+	let w = 0;
+	let sawVisible = false;
+	for (const tok of tokens) {
+		if (tok.ansi) {
+			out += tok.s;
+			continue;
+		}
+		const cw = isWideChar(tok.cp) ? 2 : 1;
+		if (!sawVisible && tok.s.trim() === "") {
+			if (w + cw > width) break;
+			out += tok.s;
+			w += cw;
+			continue;
+		}
+		if (w + cw > width && w > 0) break;
+		out += tok.s;
+		w += cw;
+		sawVisible = true;
+	}
+	return out;
+}
+
+interface AnsiToken {
+	ansi: boolean;
+	s: string;
+	cp: number;
+}
+
+function ansiTokens(line: string): AnsiToken[] {
+	const tokens: AnsiToken[] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\x1b") {
+			const j = skipEscape(line, i);
+			tokens.push({ ansi: true, s: line.slice(i, j), cp: 0 });
+			i = j;
+		} else {
+			const cp = line.codePointAt(i) ?? 0;
+			const ch = String.fromCodePoint(cp);
+			tokens.push({ ansi: false, s: ch, cp });
+			i += cp > 0xffff ? 2 : 1;
+		}
+	}
+	return tokens;
+}
+
+function splitAnsi(line: string): { text: string; ansiPrefix: string; ansiSuffix: string } {
+	const tokens = ansiTokens(line);
+	let prefix = "";
+	let start = 0;
+	while (start < tokens.length && (tokens[start].ansi || tokens[start].s.trim() === "")) {
+		prefix += tokens[start].s;
+		start += 1;
+	}
+	let suffix = "";
+	let end = tokens.length;
+	while (end > start && tokens[end - 1].ansi) {
+		suffix = tokens[end - 1].s + suffix;
+		end -= 1;
+	}
+	return { text: tokens.slice(start, end).map((t) => t.s).join(""), ansiPrefix: prefix, ansiSuffix: suffix };
+}
+
+export function clampScrollTop(scrollTop: number, bodyLength: number, avail: number): number {
+	const max = Math.max(0, bodyLength - avail);
+	return Math.min(Math.max(0, scrollTop), max);
+}
+
+export interface WindowResult {
+	top: number;
+	lines: string[];
+	atEnd: boolean;
+}
+
+export function windowSlice(body: string[], scrollTop: number, avail: number): WindowResult {
+	const top = clampScrollTop(scrollTop, body.length, avail);
+	return {
+		top,
+		lines: body.slice(top, top + avail),
+		atEnd: top >= Math.max(0, body.length - avail),
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Overlay component (bordered, scrollable, render(width) contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface KeyLike {
+	matches(data: string, id: string): boolean;
+}
+
+export interface OverlayComponent {
+	render(width: number): string[];
+	invalidate(): void;
+	handleInput(data: string): void;
+}
+
+export interface OverlayComponentOpts {
+	header: string;
+	body: string[];
+	footer: string;
+	theme: FooterTheme;
+	kb: KeyLike;
+	done: (value: unknown) => void;
+	rowGen: () => number;
+	lang: Lang;
+}
+
+export function createOverlayComponent(opts: OverlayComponentOpts): OverlayComponent {
+	const { header, body, footer, theme, kb, done, rowGen, lang } = opts;
+	let scrollTop = 0;
+	let closed = false;
+	let lastWidth = 80;
+	const body0 = body[0] === "" ? body.slice(1) : body;
+
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		done(undefined);
+	};
+
+	function maxRowsAt(): number {
+		return Math.max(1, Math.floor(rowGen() * 0.8));
+	}
+
+	function layout(width: number): { avail: number; canStatus: boolean; boxed: boolean } {
+		const maxRows = maxRowsAt();
+		const boxed = maxRows >= 6 && width >= 8;
+		const chrome = boxed ? 5 : 3;
+		const avail = Math.max(0, maxRows - chrome);
+		const canStatus = boxed && maxRows >= chrome + 3;
+		return { avail, canStatus, boxed };
+	}
+
+	function scrollWindowAt(w: number): { bodyLines: string[]; avail: number; needsStatus: boolean } {
+		const innerW = Math.max(1, w - 2);
+		const bodyLines = wrapLines(body0, innerW);
+		const { avail, canStatus } = layout(w);
+		const needsStatus = canStatus && bodyLines.length > avail;
+		const bodyAvail = needsStatus ? Math.max(0, avail - 2) : avail;
+		return { bodyLines, avail: bodyAvail, needsStatus };
+	}
+
+	function renderLines(width: number): string[] {
+		const w = Math.max(1, width);
+		const innerW = Math.max(1, w - 2);
+		const { bodyLines, avail: bodyAvail, needsStatus } = scrollWindowAt(w);
+		const { boxed } = layout(w);
+		const win = windowSlice(bodyLines, scrollTop, bodyAvail);
+		scrollTop = win.top;
+		const statusRow = needsStatus
+			? clampChrome(`  ${theme.fg("muted", msg(lang, "scrollStatus", { pos: win.atEnd ? bodyLines.length : win.top + win.lines.length, total: bodyLines.length }))}`, innerW)
+			: null;
+		const footerText = innerW < 20 ? msg(lang, "pressCloseShort") : footer;
+		const footerRow = clampChrome(`  ${theme.fg("dim", footerText)}`, innerW);
+		const titleRow = clampChrome(`  ${theme.fg("accent", header)}`, innerW);
+		const blocks: string[] = [""];
+		blocks.push(...win.lines);
+		if (statusRow) {
+			blocks.push("");
+			blocks.push(statusRow);
+		}
+		blocks.push("");
+		blocks.push(footerRow);
+		if (!boxed) {
+			const out: string[] = [titleRow];
+			if (win.lines.length > 0) out.push("", ...win.lines);
+			if (statusRow) out.push("", statusRow);
+			out.push(footerRow);
+			return out;
+		}
+		const titleStr = clampChrome(` ${theme.fg("accent", header)} `, innerW);
+		const titleW = visualWidth(titleStr);
+		const pad = Math.max(0, innerW - titleW);
+		const topPad = Math.floor(pad / 2);
+		const topPad2 = pad - topPad;
+		const top = theme.fg("border", "╭") + theme.fg("border", "─".repeat(topPad)) + titleStr + theme.fg("border", "─".repeat(topPad2)) + theme.fg("border", "╮");
+		const bottom = theme.fg("border", `╰${"─".repeat(Math.max(0, innerW))}╯`);
+		const out: string[] = [top];
+		for (const line of blocks) {
+			const inner = line === "" ? " ".repeat(innerW) : padToWidth(line, innerW);
+			out.push(`${theme.fg("border", "│")}${inner}${theme.fg("border", "│")}`);
+		}
+		out.push(bottom);
+		return out;
+	}
+
+	return {
+		render(width: number) {
+			lastWidth = Math.max(1, width);
+			return renderLines(lastWidth);
+		},
+		invalidate() {
+			// render() recomputes everything; kept as the pi contract entry.
+		},
+		handleInput(data: string) {
+			if (closed) return;
+			if (kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel")) {
+				close();
+				return;
+			}
+			const w = Math.max(1, lastWidth);
+			const { bodyLines, avail: bodyAvail } = scrollWindowAt(w);
+			const max = Math.max(0, bodyLines.length - bodyAvail);
+			if (kb.matches(data, "tui.select.up")) {
+				scrollTop = clampScrollTop(scrollTop - 1, bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.down")) {
+				scrollTop = clampScrollTop(scrollTop + 1, bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.pageUp") || kb.matches(data, "tui.altScreen.pageUp")) {
+				scrollTop = clampScrollTop(scrollTop - Math.max(1, bodyAvail - 1), bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.pageDown") || kb.matches(data, "tui.altScreen.pageDown")) {
+				scrollTop = clampScrollTop(scrollTop + Math.max(1, bodyAvail - 1), bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.altScreen.top")) {
+				scrollTop = 0;
+			} else if (kb.matches(data, "tui.altScreen.bottom")) {
+				scrollTop = max;
+			} else if (data.toLowerCase() === "r") {
+				// Refresh handled by the owning component via a callback; base
+				// overlay keeps scrolling and closing only (see factory).
+			}
+		},
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Footer rendering
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FooterTheme {
+	fg(role: string, text: string): string;
+}
+
+export const identityTheme: FooterTheme = { fg: (_role, text) => text };
+
+function colorRoleForRemaining(remaining: number): string {
+	if (remaining >= 50) return "success";
+	if (remaining >= 20) return "warning";
+	return "error";
+}
+
+export function renderBar(remainingPercent: number, theme: FooterTheme): string {
+	const width = 8;
+	const filled = Math.round((clampPercent(remainingPercent) / 100) * width);
+	return theme.fg(colorRoleForRemaining(remainingPercent), "█".repeat(filled)) + theme.fg("dim", "░".repeat(width - filled));
+}
+
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+const WEEKDAYS_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+export function formatReset(resetsAt: number | undefined, now: number, lang: Lang = "en"): string {
+	if (resetsAt === undefined || !Number.isFinite(resetsAt)) return "";
+	const ms = resetsAt * 1_000;
+	const diff = ms - now;
+	if (diff <= 0) return "";
+	if (diff < 24 * 3_600_000) {
+		const h = Math.floor(diff / 3_600_000);
+		const m = Math.floor((diff % 3_600_000) / 60_000);
+		return h > 0 ? `${h}h ${m}m` : `${Math.max(1, m)}m`;
+	}
+	const at = new Date(ms);
+	if (diff < 7 * 24 * 3_600_000) {
+		const hh = String(at.getHours()).padStart(2, "0");
+		const mm = String(at.getMinutes()).padStart(2, "0");
+		const day = lang === "zh" ? WEEKDAYS_ZH[at.getDay()] : WEEKDAYS[at.getDay()];
+		return `${day} ${hh}:${mm}`;
+	}
+	if (lang === "zh") return `${at.getMonth() + 1}月${at.getDate()}日`;
+	return `${MONTHS[at.getMonth()]}${String(at.getDate()).padStart(2, "0")}`;
+}
+
+/** Compact footer label for a bucket: `codex`, `spark`, or the variant name. */
+export function compactBucketLabel(bucket: Pick<LimitBucket, "limitId" | "limitName">): string {
+	if (normalizedUsageKey(bucket.limitId) === "codex") return "codex";
+	const raw = bucket.limitName ?? bucket.limitId;
+	const variant = raw.match(/codex[\s-_]+(.+)$/i)?.[1];
+	if (variant) return variant.trim().toLowerCase();
+	const parts = raw.replace(/[_\s-]+/g, " ").trim().split(/\s+/);
+	return (parts.at(-1) ?? raw).toLowerCase();
+}
+
+export interface FooterOpts {
+	now: number;
+	stale?: boolean;
+	theme?: FooterTheme;
+	lang?: Lang;
+}
+
+/** GLM-style multi-bar footer for the active bucket: `codex 5h ████░ 43% · 7d ██████ 12% ↻5h 12m`. */
+export function renderFooter(snapshot: Snapshot, opts: FooterOpts): string {
+	const theme = opts.theme ?? identityTheme;
+	const lang = opts.lang ?? "en";
+	const label = compactBucketLabel(snapshot.buckets[0] ?? { limitId: "codex" });
+	const segs: string[] = [];
+	const windows: Array<{ w: UsageWindow | undefined; fallback: string }> = [
+		{ w: snapshot.buckets[0]?.primary, fallback: msg(lang, "windowPrimary") },
+		{ w: snapshot.buckets[0]?.secondary, fallback: msg(lang, "windowSecondary") },
+	];
+	const resetUs = windows
+		.map((x) => x.w?.resetsAt)
+		.filter((v): v is number => v !== undefined)
+		.sort((a, b) => a - b)[0];
+		const resetText = resetUs !== undefined ? formatReset(resetUs, opts.now, lang) : "";
+	for (const win of windows) {
+		if (!win.w) continue;
+		const remaining = Math.round(100 - clampPercent(win.w.usedPercent));
+		const labelText = win.w.windowMinutes !== undefined ? windowLabel(win.w.windowMinutes) : win.fallback;
+		const chunk = `${labelText} ${renderBar(remaining, theme)} ${remaining}%`;
+		segs.push(theme.fg("dim", chunk));
+	}
+	if (segs.length === 0) return `${label} ${theme.fg("dim", msg(lang, "nA"))}`;
+	let footer = segs.join(" · ");
+	if (resetText) footer += ` ${theme.fg("dim", msg(lang, "resetsIn", { t: resetText }))}`;
+	if (opts.stale) footer = `${theme.fg("dim", "~")}${footer}`;
+	return `${label} ${footer}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Report text & JSON payload
+// ─────────────────────────────────────────────────────────────────────────────
+
+function formatAge(ms: number, lang: Lang): string {
+	if (ms < 5_000) return msg(lang, "ageJustNow");
+	if (ms < 60_000) return msg(lang, "ageSec", { n: Math.round(ms / 1_000) });
+	if (ms < 3_600_000) return msg(lang, "ageMin", { n: Math.round(ms / 60_000) });
+	return msg(lang, "ageHour", { n: Math.round(ms / 3_600_000) });
+}
+
+export function remainingPercent(w: UsageWindow | undefined): number | null {
+	return w === undefined ? null : Math.round(100 - clampPercent(w.usedPercent));
+}
+
+export function buildReportLines(snapshot: Snapshot, opts: { now: number; lang: Lang; stale?: boolean; resetInventory?: ResetCreditInventory }): string[] {
+	const lines: string[] = [];
+	const age = formatAge(Math.max(0, opts.now - snapshot.capturedAt), opts.lang);
+	lines.push(msg(opts.lang, "plan", { plan: snapshot.planType ?? "?" }));
+	lines.push(`${msg(opts.lang, "updatedAgo", { age })}${opts.stale ? ` (${msg(opts.lang, "nA")? "~":"~"})` : ""} · ${msg(opts.lang, "source", { source: snapshot.source === "api" ? "API" : "headers" })}`);
+	for (const bucket of snapshot.buckets) {
+		const label = bucket.limitName ?? bucket.limitId;
+		const wins: Array<{ w: UsageWindow | undefined; fallback: string }> = [
+			{ w: bucket.primary, fallback: msg(opts.lang, "windowPrimary") },
+			{ w: bucket.secondary, fallback: msg(opts.lang, "windowSecondary") },
+		];
+		for (const { w, fallback } of wins) {
+			if (!w) continue;
+			const rem = remainingPercent(w);
+			const labelText = w.windowMinutes !== undefined ? windowLabel(w.windowMinutes) : fallback;
+			const reset = formatReset(w.resetsAt, opts.now, opts.lang);
+			lines.push(`  ${label} ${labelText} ${msg(opts.lang, "limitWindow")}: ${renderBar(rem ?? 0, identityTheme)} ${rem ?? "?"}% ${msg(opts.lang, "left")}${reset ? ` · ${msg(opts.lang, "resetsIn", { t: reset })}` : ""}`);
+		}
+	}
+	const credits = snapshot.credits ?? snapshot.buckets[0]?.credits;
+	if (credits) {
+		const value = credits.unlimited ? msg(opts.lang, "creditsUnlimited") : credits.balance?.trim() ? credits.balance : msg(opts.lang, "creditsAvailable");
+		lines.push(`  ${msg(opts.lang, "credits")}: ${value}`);
+	}
+	const rc = snapshot.resetCredits?.availableCount;
+	lines.push(`  ${msg(opts.lang, "resetCredits")}: ${rc === undefined ? msg(opts.lang, "resetCountMissing") : rc === 0 ? msg(opts.lang, "resetCountNone") : rc === 1 ? msg(opts.lang, "resetCountOne", { n: rc }) : msg(opts.lang, "resetCountMany", { n: rc })}`);
+	if (opts.resetInventory && opts.resetInventory.options.length > 0) {
+		for (const option of opts.resetInventory.options) {
+			const expiry = option.expiresAt !== undefined ? msg(opts.lang, "resetOptionExpires", { at: formatReset(option.expiresAt, opts.now, opts.lang) || "?" }) : "";
+			lines.push(`    ${msg(opts.lang, "resetOption", { title: option.title, desc: option.description })}${expiry ? ` (${expiry})` : ""}`);
+		}
+		lines.push(`    ${msg(opts.lang, "resetOptionHint")}`);
+	}
+	const sc = snapshot.spendControl;
+	if (sc) {
+		const bits: string[] = [];
+		if (sc.reached !== undefined) bits.push(sc.reached ? msg(opts.lang, "spendReached") : "—");
+		if (sc.individualLimit) bits.push(msg(opts.lang, "spendLimit", { limit: sc.individualLimit.limit ?? "", used: sc.individualLimit.used ?? "", remainingPercent: sc.individualLimit.remainingPercent ?? "" }));
+		if (bits.length > 0) lines.push(`  ${msg(opts.lang, "spendControl")}: ${bits.join(" · ")}`);
+	}
+	if (snapshot.warnings.length > 0) {
+		lines.push(`  ${msg(opts.lang, "warnings")}:`);
+		for (const w of snapshot.warnings) lines.push(`    ${w}`);
+	}
+	lines.push("");
+	lines.push(msg(opts.lang, "visitPage"));
+	return lines;
+}
+
+/** Stable English-key JSON payload; never contains account id or fingerprint. */
+export function toJsonPayload(snapshot: Snapshot, opts: { stale?: boolean; resetInventory?: ResetCreditInventory }): unknown {
+	return {
+		schemaVersion: snapshot.schemaVersion,
+		capturedAt: snapshot.capturedAt,
+		freshness: opts.stale ? "stale" : "fresh",
+		source: snapshot.source,
+		...(snapshot.planType ? { planType: snapshot.planType } : {}),
+		...(snapshot.rateLimitReachedType ? { rateLimitReachedType: snapshot.rateLimitReachedType } : {}),
+		...(snapshot.limitReached !== undefined ? { limitReached: snapshot.limitReached } : {}),
+		...(snapshot.allowed !== undefined ? { allowed: snapshot.allowed } : {}),
+		buckets: snapshot.buckets.map((b) => ({
+			limitId: b.limitId,
+			...(b.limitName ? { limitName: b.limitName } : {}),
+			...(b.primary ? { primary: { ...b.primary } } : {}),
+			...(b.secondary ? { secondary: { ...b.secondary } } : {}),
+			...(b.credits ? { credits: { ...b.credits } } : {}),
+		})),
+		...(snapshot.credits ? { credits: { ...snapshot.credits } } : {}),
+		...(snapshot.resetCredits ? { resetCredits: { ...snapshot.resetCredits } } : {}),
+		...(opts.resetInventory ? { resetCreditOptions: opts.resetInventory.options } : {}),
+		...(snapshot.spendControl ? { spendControl: snapshot.spendControl } : {}),
+		warnings: snapshot.warnings,
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Passive header parse & merge (ADR-0004)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface HeaderWindowUpdate {
+	usedPercent?: number;
+	windowMinutes?: number;
+	resetsAt?: number;
+}
+
+export interface HeaderBucketUpdate {
+	limitId: string;
+	limitName?: string;
+	primary?: HeaderWindowUpdate;
+	secondary?: HeaderWindowUpdate;
+	credits?: Credits;
+}
+
+export interface HeaderUpdate {
+	buckets: HeaderBucketUpdate[];
+	promoMessage?: string;
+	planType?: string;
+	rateLimitReachedType?: string;
+}
+
+function headerMap(headers: Record<string, string>): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const [k, v] of Object.entries(headers)) {
+		if (v !== undefined && v !== null) out.set(k.toLowerCase(), String(v));
+	}
+	return out;
+}
+
+function hNum(map: Map<string, string>, name: string): number | undefined {
+	const raw = map.get(name);
+	if (raw === undefined || raw.trim() === "") return undefined;
+	const n = Number(raw);
+	return Number.isFinite(n) ? n : undefined;
+}
+
+function hBool(map: Map<string, string>, name: string): boolean | undefined {
+	const raw = map.get(name)?.trim().toLowerCase();
+	if (raw === "true" || raw === "1") return true;
+	if (raw === "false" || raw === "0") return false;
+	return undefined;
+}
+
+function parseHeaderWindow(map: Map<string, string>, prefix: string, now: number): HeaderWindowUpdate | undefined {
+	const usedPercent = hNum(map, `${prefix}-used-percent`);
+	const windowMinutes = hNum(map, `${prefix}-window-minutes`);
+	const resetAtRaw = hNum(map, `${prefix}-reset-at`);
+	const resetAfterRaw = hNum(map, `${prefix}-reset-after-seconds`);
+	const resetsAt = resetAtRaw !== undefined ? (resetAtRaw >= 10_000_000_000 ? Math.round(resetAtRaw / 1_000) : resetAtRaw) : resetAfterRaw !== undefined ? Math.round(now / 1_000) + resetAfterRaw : undefined;
+	if (usedPercent === undefined && windowMinutes === undefined && resetsAt === undefined) return undefined;
+	return {
+		...(usedPercent !== undefined ? { usedPercent: clampPercent(usedPercent) } : {}),
+		...(windowMinutes !== undefined ? { windowMinutes } : {}),
+		...(resetsAt !== undefined ? { resetsAt } : {}),
+	};
+}
+
+function parseHeaderBucket(map: Map<string, string>, limitId: string, now: number): HeaderBucketUpdate | undefined {
+	const dashed = normalizeLimitId(limitId).replace(/_/g, "-");
+	const prefixes = [`x-${dashed}`];
+	const under = limitId.includes("_") ? `x-${limitId}` : undefined;
+	if (under) prefixes.push(under);
+	let primary: HeaderWindowUpdate | undefined;
+	let secondary: HeaderWindowUpdate | undefined;
+	let limitName: string | undefined;
+	for (const prefix of prefixes) {
+		primary ??= parseHeaderWindow(map, `${prefix}-primary`, now);
+		secondary ??= parseHeaderWindow(map, `${prefix}-secondary`, now);
+		limitName ??= map.get(`${prefix}-limit-name`)?.trim();
+	}
+	if (!primary && !secondary && !limitName) return undefined;
+	return {
+		limitId: normalizeLimitId(limitId),
+		...(limitName ? { limitName: sanitizeDisplayText(limitName) ?? undefined } : {}),
+		...(primary ? { primary } : {}),
+		...(secondary ? { secondary } : {}),
+	};
+}
+
+/** Parse the official `x-{limit}-*` header families (plus reset-after compat). */
+export function parseRateLimitHeaders(headers: Record<string, string>, now = Date.now()): HeaderUpdate | undefined {
+	const map = headerMap(headers);
+	const ids = new Set<string>(["codex"]);
+	for (const key of map.keys()) {
+		const match = /^x-([a-z0-9_-]+)-primary-used-percent$/.exec(key);
+		if (match?.[1]) ids.add(normalizeLimitId(match[1]));
+	}
+	const buckets: HeaderBucketUpdate[] = [];
+	for (const id of ids) {
+		const bucket = parseHeaderBucket(map, id, now);
+		if (bucket) buckets.push(bucket);
+	}
+	const credits = parseHeaderCredits(map);
+	if (buckets.length === 0 && !credits) return undefined;
+	if (credits) {
+		const codex = buckets.find((b) => b.limitId === "codex");
+		if (codex) codex.credits = credits;
+		else buckets.push({ limitId: "codex", credits });
+	}
+	const promo = map.get("x-codex-promo-message")?.trim();
+	const planType = map.get("x-codex-plan-type")?.trim();
+	const reached = map.get("x-codex-rate-limit-reached-type")?.trim();
+	const out: HeaderUpdate = { buckets };
+	if (promo) out.promoMessage = promo;
+	if (planType) out.planType = planType;
+	if (reached) out.rateLimitReachedType = reached;
+	return out;
+}
+
+function parseHeaderCredits(map: Map<string, string>): Credits | undefined {
+	const hasCredits = hBool(map, "x-codex-credits-has-credits");
+	const unlimited = hBool(map, "x-codex-credits-unlimited");
+	const balanceRaw = map.get("x-codex-credits-balance");
+	if (hasCredits === undefined && unlimited === undefined && balanceRaw === undefined) return undefined;
+	return {
+		...(hasCredits !== undefined ? { hasCredits } : {}),
+		...(unlimited !== undefined ? { unlimited } : {}),
+		...(balanceRaw && balanceRaw.trim() ? { balance: balanceRaw } : {}),
+	} as Credits;
+}
+
+/** Field-wise merge over an existing snapshot; never introduces new buckets. */
+export function mergeHeaderUpdate(snapshot: Snapshot, update: HeaderUpdate): Snapshot {
+	const buckets = snapshot.buckets.map((bucket) => {
+		const up = update.buckets.find((b) => b.limitId === bucket.limitId);
+		if (!up) return bucket;
+		const next: LimitBucket = { ...bucket };
+		if (up.primary) {
+			const merged: UsageWindow = {
+				usedPercent: up.primary.usedPercent ?? bucket.primary?.usedPercent ?? 0,
+			};
+			if (up.primary.windowMinutes !== undefined) merged.windowMinutes = up.primary.windowMinutes;
+			else if (bucket.primary?.windowMinutes !== undefined) merged.windowMinutes = bucket.primary.windowMinutes;
+			if (up.primary.resetsAt !== undefined) merged.resetsAt = up.primary.resetsAt;
+			else if (bucket.primary?.resetsAt !== undefined) merged.resetsAt = bucket.primary.resetsAt;
+			next.primary = merged;
+		}
+		if (up.secondary) {
+			const merged: UsageWindow = {
+				usedPercent: up.secondary.usedPercent ?? bucket.secondary?.usedPercent ?? 0,
+			};
+			if (up.secondary.windowMinutes !== undefined) merged.windowMinutes = up.secondary.windowMinutes;
+			else if (bucket.secondary?.windowMinutes !== undefined) merged.windowMinutes = bucket.secondary.windowMinutes;
+			if (up.secondary.resetsAt !== undefined) merged.resetsAt = up.secondary.resetsAt;
+			else if (bucket.secondary?.resetsAt !== undefined) merged.resetsAt = bucket.secondary.resetsAt;
+			next.secondary = merged;
+		}
+		if (up.credits) next.credits = { ...(bucket.credits ?? {}), ...up.credits } as Credits;
+		if (up.limitName) next.limitName = up.limitName;
+		return next;
+	});
+	const next: Snapshot = { ...snapshot, buckets };
+	if (update.planType) next.planType = update.planType;
+	if (update.rateLimitReachedType) next.rateLimitReachedType = update.rateLimitReachedType;
+	// capturedAt/source/freshness intentionally untouched (ADR-0004).
+	return next;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot persistence store (ADR-0007)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SnapshotStoreRow {
+	t: number;
+	fingerprint: string;
+	snapshot: Snapshot;
+}
+
+export interface SnapshotStoreLike {
+	append(row: SnapshotStoreRow): void;
+	load(fingerprint: string): SnapshotStoreRow | undefined;
+}
+
+export interface StoreIo {
+	readFile(p: string): string | null;
+	appendFile(p: string, s: string): void;
+	writeFile(p: string, s: string): void;
+	rename(from: string, to: string): void;
+	mkdir(p: string): void;
+}
+
+export const SNAPSHOT_KEEP = 500;
+export const SNAPSHOT_COMPACT_AT = 1_000;
+export const SNAPSHOT_FILE_NAME = "pi-openai-codex-usage-snapshots.jsonl";
+
+function rowHygienic(raw: unknown): boolean {
+	const text = JSON.stringify(raw);
+	if (!text) return false;
+	const lower = text.toLowerCase();
+	return !lower.includes("access_token") && !lower.includes("authorization") && !lower.includes("bearer") && !lower.includes("accountid");
+}
+
+export function createSnapshotStore(dir: string, io: StoreIo): SnapshotStoreLike {
+	const file = nodePath.join(dir, SNAPSHOT_FILE_NAME);
+	const parseAll = (): SnapshotStoreRow[] => {
+		const raw = io.readFile(file);
+		if (raw === null) return [];
+		const out: SnapshotStoreRow[] = [];
+		for (const line of raw.split("\n")) {
+			const t = line.trim();
+			if (!t) continue;
+			try {
+				const r = JSON.parse(t) as unknown;
+				if (!isRecord(r)) continue;
+				if (typeof r["t"] !== "number" || typeof r["fingerprint"] !== "string" || !isRecord(r["snapshot"])) continue;
+				if (!rowHygienic(r)) continue;
+				out.push({ t: r["t"], fingerprint: r["fingerprint"], snapshot: r["snapshot"] as unknown as Snapshot });
+			} catch {
+				// skip corrupt lines
+			}
+		}
+		return out;
+	};
+	return {
+		append(row) {
+			try {
+				io.mkdir(dir);
+				const all = parseAll();
+				all.push(row);
+				if (all.length > SNAPSHOT_COMPACT_AT) {
+					const kept = all.slice(-SNAPSHOT_KEEP);
+					const tmp = `${file}.tmp`;
+					io.writeFile(tmp, kept.map((r) => JSON.stringify(r)).join("\n") + "\n");
+					io.rename(tmp, file);
+				} else {
+					io.appendFile(file, JSON.stringify(row) + "\n");
+				}
+			} catch {
+				// best effort
+			}
+		},
+		load(fingerprint) {
+			const all = parseAll();
+			for (let i = all.length - 1; i >= 0; i -= 1) {
+				if (all[i].fingerprint === fingerprint) return all[i];
+			}
+			return undefined;
+		},
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts (two transitions only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AlertStateV1 {
+	reachedType?: string;
+	authInvalidReported?: boolean;
+}
+
+export interface AlertEmission {
+	kind: "auth-invalid" | "reached";
+	messageKey: MsgKey;
+	vars?: MsgVars;
+}
+
+function reachedMessageKey(kind: string | undefined): { key: MsgKey; vars?: MsgVars } {
+	switch (kind) {
+		case "rate_limit_reached":
+			return { key: "alertReachedLimit" };
+		case "workspace_owner_credits_depleted":
+			return { key: "alertReachedOwnerCredits" };
+		case "workspace_member_credits_depleted":
+			return { key: "alertReachedMemberCredits" };
+		case "workspace_owner_usage_limit_reached":
+			return { key: "alertReachedOwnerUsage" };
+		case "workspace_member_usage_limit_reached":
+			return { key: "alertReachedMemberUsage" };
+		default:
+			return { key: "alertReachedUnknown", vars: { kind: kind ?? "unknown" } };
+	}
+}
+
+export function evaluateAlerts(prev: AlertStateV1 | null, next: { snapshot: Snapshot; authInvalid: boolean }): { emitted: AlertEmission[]; state: AlertStateV1 } {
+	const emitted: AlertEmission[] = [];
+	const nextReached = next.snapshot.rateLimitReachedType;
+	const state: AlertStateV1 = {};
+	if (next.authInvalid && prev?.authInvalidReported !== true) {
+		emitted.push({ kind: "auth-invalid", messageKey: "alertAuthInvalid" });
+		state.authInvalidReported = true;
+	} else if (!next.authInvalid) {
+		state.authInvalidReported = false;
+	} else {
+		state.authInvalidReported = true;
+	}
+	if (nextReached !== undefined && nextReached !== prev?.reachedType) {
+		const mapped = reachedMessageKey(nextReached);
+		emitted.push({ kind: "reached", messageKey: mapped.key, ...(mapped.vars ? { vars: mapped.vars } : {}) });
+		state.reachedType = nextReached;
+	} else if (nextReached === undefined) {
+		state.reachedType = undefined;
+	} else {
+		state.reachedType = prev?.reachedType;
+	}
+	return { emitted, state };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reset credits client additions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ResetInventoryResult =
+	| { status: "ok"; inventory: ResetCreditInventory }
+	| { status: "retry"; retryAfterMs: number }
+	| { status: "error"; code: UsageError["code"]; message: string };
+
+export type ConsumeResetResult =
+	| { status: "ok"; code: "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed"; windowsReset: number }
+	| { status: "retry"; retryAfterMs: number }
+	| { status: "error"; code: UsageError["code"]; message: string };
+
+export interface ResetCreditClientLike {
+	listResetCredits(token: string, accountId: string, signal?: AbortSignal): Promise<ResetInventoryResult>;
+	consumeResetCredit(token: string, accountId: string, body: { redeem_request_id: string; credit_id?: string }, signal?: AbortSignal): Promise<ConsumeResetResult>;
+}
+
+async function resetRequest(
+	fetchImpl: typeof fetch,
+	url: string,
+	body: string | undefined,
+	token: string,
+	accountId: string,
+	userAgent: string,
+	timeoutMs: number,
+	maxBodyBytes: number,
+	signal: AbortSignal | undefined,
+): Promise<{ status: number; text: string }> {
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	const response = await fetchImpl(url, {
+		method: body === undefined ? "GET" : "POST",
+		...(body !== undefined ? { body } : {}),
+		headers: {
+			Authorization: `Bearer ${token}`,
+			...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+			Accept: "application/json",
+			...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+			"User-Agent": userAgent,
+		},
+		signal: combined,
+		redirect: "manual",
+	});
+	const text = await readBoundedBody(response, maxBodyBytes, signal).catch(() => "");
+	return { status: response.status, text };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extension factory and default wiring
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type TimerHandle = ReturnType<typeof setTimeout> & { unref?: () => void };
+
+export interface UiLike {
+	setStatus(key: string, text: string | undefined): void;
+	notify(message: string, level: "info" | "warning" | "error"): void;
+	theme: FooterTheme;
+	custom?(
+		factory: (tui: unknown, theme: FooterTheme, kb: KeyLike, done: (value: unknown) => void) => OverlayComponent,
+		options?: { overlay?: boolean; overlayOptions?: { maxHeight?: string | number } },
+	): Promise<unknown>;
+	select?(opts: { message: string; options: Array<{ id: string; label: string; description?: string }> }): Promise<{ id: string } | undefined>;
+	confirm?(opts: { message: string }): Promise<boolean>;
+}
+
+export interface ExtensionDeps {
+	env?: Record<string, string | undefined>;
+	nowFn?: () => number;
+	setTimeout?: typeof setTimeout;
+	clearTimeout?: typeof clearTimeout;
+	setInterval?: typeof setInterval;
+	clearInterval?: typeof clearInterval;
+	interactive?: (ctx: CtxLike) => boolean;
+	clientFor(): UsageClientLike & ResetCreditClientLike;
+	authFor(ctx: CtxLike, opts: { requireActiveModel: boolean; wantToken?: boolean }): Promise<AuthResolution>;
+	credentialReader?: CredentialReader;
+	ensureReader?: () => Promise<void>;
+	snapshotStore?: SnapshotStoreLike;
+	resetIdFactory?: () => string;
+}
+
+const REFRESH_DEBOUNCE_MS = 60_000;
+const HEARTBEAT_MS = 5 * 60_000;
+const COUNTDOWN_TICK_MS = 30_000;
+const STALE_HARD_MS = 10 * 60_000;
+const RESET_ONESHOT_SKEW_MS = 5_000;
+const ZERO_LATCH_MS = 15_000;
+const ZERO_LATCH_RETRY_MS = 1_000;
+
+interface ExtensionState {
+	active: boolean;
+	snapshot: Snapshot | null;
+	stale: boolean;
+	fingerprint: string | null;
+	authInvalid: boolean;
+	retryDeadline: number;
+	nextAllowedAt: number;
+	inFlight: boolean;
+	generation: number;
+	consecutiveFailures: number;
+	lastOkFetchAt: number;
+	zeroLatch: { limitId: string; firstSeenAt: number } | null;
+	resetOneShot: TimerHandle | null;
+	alertState: AlertStateV1 | null;
+	lastCtx: CtxLike | null;
+	resetInventory: ResetCreditInventory | null;
+}
+
+export function createExtension(deps: ExtensionDeps) {
+	const now = () => (deps.nowFn ?? Date.now)();
+	const setTimeoutImpl = deps.setTimeout ?? setTimeout;
+	const clearTimeoutImpl = deps.clearTimeout ?? clearTimeout;
+	const setIntervalImpl = deps.setInterval ?? setInterval;
+	const clearIntervalImpl = deps.clearInterval ?? clearInterval;
+	const isInteractive = (ctx: CtxLike) => deps.interactive?.(ctx) ?? (ctx.mode === "tui" || ctx.hasUI === true);
+	const lang = resolveLang(deps.env ?? {});
+	const store = deps.snapshotStore ?? { append() { /* */ }, load: () => undefined };
+
+	return function install(pi: unknown): void {
+		const s: ExtensionState = {
+			active: false,
+			snapshot: null,
+			stale: false,
+			fingerprint: null,
+			authInvalid: false,
+			retryDeadline: 0,
+			nextAllowedAt: 0,
+			inFlight: false,
+			generation: 0,
+			consecutiveFailures: 0,
+			lastOkFetchAt: 0,
+			zeroLatch: null,
+			resetOneShot: null,
+			alertState: null,
+			lastCtx: null,
+			resetInventory: null,
+		};
+
+		const api = pi as {
+			on(event: string, handler: (event: unknown, ctx: CtxLike) => Promise<void> | void): void;
+			registerCommand(name: string, opts: { description: string; getArgumentCompletions?: (prefix: string) => Array<{ value: string; label?: string; description?: string }> | null; handler: (args: string, ctx: CtxLike) => Promise<void> | void }): void;
+		};
+
+		let heartbeatTimer: TimerHandle | null = null;
+		let countdownTimer: TimerHandle | null = null;
+		let debounceTimer: TimerHandle | null = null;
+
+		const clearTimers = () => {
+			if (heartbeatTimer) { clearIntervalImpl(heartbeatTimer as never); heartbeatTimer = null; }
+			if (countdownTimer) { clearIntervalImpl(countdownTimer as never); countdownTimer = null; }
+			if (debounceTimer) { clearTimeoutImpl(debounceTimer as never); debounceTimer = null; }
+			if (s.resetOneShot) { clearTimeoutImpl(s.resetOneShot); s.resetOneShot = null; }
+		};
+
+		function activeBucket(): Pick<LimitBucket, "limitId" | "limitName"> | undefined {
+			const ctx = s.lastCtx;
+			if (!s.snapshot || !ctx?.model) return { limitId: s.snapshot?.buckets[0]?.limitId ?? "codex" };
+			return selectActiveBucket(s.snapshot.buckets, ctx.model);
+		}
+
+		function footerText(): string {
+			if (!s.active) return "";
+			const uiLabel = "codex";
+			if (s.authInvalid) return `${uiLabel} ${uiThemed("authError")}`;
+			if (!s.snapshot) {
+				if (now() < s.retryDeadline) return `${uiLabel} ${uiThemed("rateLimited")}`;
+				return uiThemed("loadingState");
+			}
+			if (s.stale && now() - s.lastOkFetchAt > STALE_HARD_MS) return `${uiLabel} ${uiThemed("error")}`;
+			return renderFooter(s.snapshot, { now: now(), stale: s.stale, theme: undefined, lang });
+		}
+
+		function uiThemed(kind: "authError" | "rateLimited" | "error" | "loadingState"): string {
+			const ui = s.lastCtx?.ui;
+			const theme = ui?.theme ?? identityTheme;
+			const text = kind === "authError" ? msg(lang, "authError") : kind === "rateLimited" ? msg(lang, "rateLimited") : kind === "error" ? msg(lang, "error") : msg(lang, "nA");
+			const role = kind === "authError" || kind === "error" ? "error" : "dim";
+			return theme.fg(role, text);
+		}
+
+		function render(): void {
+			const ui = s.lastCtx?.ui as UiLike | undefined;
+			if (!ui) return;
+			if (!s.active) {
+				ui.setStatus("pi-openai-codex-usage", undefined);
+				return;
+			}
+			ui.setStatus("pi-openai-codex-usage", footerText());
+		}
+
+		const startHeartbeat = () => {
+			if (heartbeatTimer || !s.active) return;
+			heartbeatTimer = setIntervalImpl(() => {
+				if (s.active && s.lastCtx) void refresh(s.lastCtx, false);
+			}, HEARTBEAT_MS) as TimerHandle;
+			heartbeatTimer.unref?.();
+		};
+
+		const startCountdown = () => {
+			if (countdownTimer || !s.active) return;
+			countdownTimer = setIntervalImpl(() => {
+				if (s.active && s.snapshot) render();
+			}, COUNTDOWN_TICK_MS) as TimerHandle;
+			countdownTimer.unref?.();
+		};
+
+		const scheduleDebouncedRefresh = (ctx: CtxLike) => {
+			if (debounceTimer) return;
+			debounceTimer = setTimeoutImpl(() => {
+				debounceTimer = null;
+				if (s.active && isInteractive(ctx)) void refresh(ctx, false);
+			}, REFRESH_DEBOUNCE_MS) as TimerHandle;
+			debounceTimer.unref?.();
+		};
+
+		const scheduleResetOneShot = (snapshot: Snapshot) => {
+			if (s.resetOneShot) return;
+			const reached = snapshot.rateLimitReachedType !== undefined;
+			const bucket = s.lastCtx?.model ? selectActiveBucket(snapshot.buckets, s.lastCtx.model) : snapshot.buckets[0];
+			const windows = [snapshot.buckets.find((b) => b.limitId === bucket?.limitId)?.primary, snapshot.buckets.find((b) => b.limitId === bucket?.limitId)?.secondary];
+			const exhausted = windows.some((w) => w !== undefined && w.usedPercent >= 100) || snapshot.limitReached === true;
+			if (!reached && !exhausted) return;
+			const resetsAt = windows.map((w) => w?.resetsAt).filter((v): v is number => v !== undefined).sort((a, b) => a - b)[0];
+			if (resetsAt === undefined) return;
+			const delay = Math.max(1_000, resetsAt * 1_000 - now() + RESET_ONESHOT_SKEW_MS);
+			s.resetOneShot = setTimeoutImpl(() => {
+				s.resetOneShot = null;
+				if (s.active && s.lastCtx) void refresh(s.lastCtx, true);
+			}, delay) as TimerHandle;
+			s.resetOneShot.unref?.();
+		};
+
+		function applySnapshot(next: Snapshot, ctx: CtxLike): void {
+			const prev = s.snapshot;
+			// Provisional-zero guard: only on a non-zero → all-zero transition.
+			const prevAllZero = prev === null || prev.buckets.every((b) => !b.primary && !b.secondary) || prev.buckets.every((b) => (b.primary?.usedPercent ?? 0) === 0 && (b.secondary?.usedPercent ?? 0) === 0);
+			const nextAllZero = next.buckets.every((b) => !b.primary && !b.secondary) || next.buckets.every((b) => (b.primary?.usedPercent ?? 0) === 0 && (b.secondary?.usedPercent ?? 0) === 0);
+			if (nextAllZero && !prevAllZero) {
+				if (!s.zeroLatch) s.zeroLatch = { limitId: next.buckets[0]?.limitId ?? "codex", firstSeenAt: now() };
+				if (now() - s.zeroLatch.firstSeenAt < ZERO_LATCH_MS) {
+					const t = setTimeoutImpl(() => {
+						if (s.active) void refresh(ctx, true);
+					}, ZERO_LATCH_RETRY_MS) as TimerHandle;
+					t.unref?.();
+					return; // keep the previous snapshot until the latch resolves
+				}
+				s.zeroLatch = null;
+			}
+			if (!nextAllZero) s.zeroLatch = null;
+			s.snapshot = next;
+			s.stale = false;
+			s.lastOkFetchAt = now();
+			s.consecutiveFailures = 0;
+			if (s.fingerprint) {
+				try {
+					store.append({ t: now(), fingerprint: s.fingerprint, snapshot: next });
+				} catch { /* */ }
+			}
+			scheduleResetOneShot(next);
+		}
+
+		async function refresh(ctx: CtxLike, force: boolean): Promise<void> {
+			if (!isInteractive(ctx) || !s.active || s.inFlight) return;
+			if (!force && now() < s.retryDeadline) return;
+			if (!force && now() < s.nextAllowedAt) return;
+			s.inFlight = true;
+			const gen = s.generation;
+			try {
+				const auth = await deps.authFor(ctx, { requireActiveModel: true, wantToken: true });
+				if (gen !== s.generation) return;
+				if (auth.status !== "ok") {
+					s.authInvalid = auth.status === "auth-error";
+					const wasInvalid = s.authInvalid;
+					if (!wasInvalid && s.snapshot) { s.stale = true; }
+					if (s.snapshot === null) s.authInvalid = auth.status === "auth-error";
+					if (auth.status === "no-auth") { s.authInvalid = false; }
+					scheduleRefreshState(ctx, auth.status);
+					if (s.snapshot !== null && auth.status === "auth-error") { /* keep stale */ }
+					emitAlerts(ctx, s.snapshot, s.authInvalid);
+					render();
+					return;
+				}
+				if (auth.switched) {
+					const nextFp = accountFingerprint(auth.accountId);
+					if (s.fingerprint !== nextFp) {
+						// Account switch: drop all state.
+						s.snapshot = null;
+						s.stale = false;
+						s.alertState = null;
+						s.zeroLatch = null;
+						s.fingerprint = nextFp;
+					}
+				} else if (s.fingerprint === null) {
+					s.fingerprint = accountFingerprint(auth.accountId);
+				}
+				const client = deps.clientFor();
+				const result = await client.fetchSnapshot(auth.token, auth.accountId, undefined);
+				if (gen !== s.generation) return;
+				if (result.status === "ok") {
+					s.retryDeadline = 0;
+					s.authInvalid = false;
+					applySnapshot(result.snapshot, ctx);
+					emitAlerts(ctx, result.snapshot, false);
+				} else if (result.status === "retry") {
+					s.retryDeadline = Math.max(s.retryDeadline, now() + result.retryAfterMs);
+					s.nextAllowedAt = Math.max(s.nextAllowedAt, s.retryDeadline);
+					if (s.snapshot) s.stale = true;
+				} else {
+					if (result.code === "auth") {
+						s.authInvalid = true;
+						if (s.snapshot) s.stale = true;
+					} else {
+						s.consecutiveFailures += 1;
+						s.nextAllowedAt = now() + Math.min(1_000 * 2 ** Math.min(4, s.consecutiveFailures + 1), 60_000);
+						if (s.snapshot) s.stale = true;
+					}
+					emitAlerts(ctx, s.snapshot, s.authInvalid);
+					if (result.code === "breaker" && s.lastCtx?.ui && s.snapshot === null) {
+						s.lastCtx.ui.notify(msg(lang, "retryLater"), "warning");
+					}
+				}
+				render();
+			} catch (error) {
+				if (gen !== s.generation) return;
+				if (isStaleCtxReason(error)) return;
+				if (s.snapshot) s.stale = true;
+				render();
+			} finally {
+				s.inFlight = false;
+			}
+		}
+
+		function scheduleRefreshState(ctx: CtxLike, status: AuthResolution["status"]): void {
+			if (status === "no-auth") return;
+			if (status === "auth-error") s.nextAllowedAt = now() + 60_000;
+			// transient backoff drift handled elsewhere
+		}
+
+		function emitAlerts(ctx: CtxLike, snapshot: Snapshot | null, authInvalid: boolean): void {
+			const ui = ctx.ui as UiLike | undefined;
+			if (!ui) return;
+			if (snapshot === null) {
+				if (authInvalid) {
+					const { emitted } = evaluateAlerts(s.alertState, { snapshot: emptySnapshot0(), authInvalid: true });
+					for (const e of emitted) ui.notify(msg(lang, e.messageKey, e.vars ?? {}), "warning");
+				}
+				return;
+			}
+			const { emitted, state } = evaluateAlerts(s.alertState, { snapshot, authInvalid: false });
+			s.alertState = state;
+			for (const e of emitted) ui.notify(msg(lang, e.messageKey, e.vars ?? {}), e.kind === "reached" ? "warning" : "error");
+		}
+
+		function emptySnapshot0(): Snapshot {
+			return { schemaVersion: 1, capturedAt: now(), source: "api", buckets: [], warnings: [] };
+		}
+
+		async function activate(ctx: CtxLike, modelFromEvent?: { provider?: string; id?: string; name?: string } | null): Promise<void> {
+			s.lastCtx = ctx;
+			const model = modelFromEvent ?? ctx.model ?? null;
+			if (model?.provider !== PROVIDER_ID) {
+				s.active = false;
+				s.snapshot = null;
+				s.stale = false;
+				clearTimers();
+				render();
+				return;
+			}
+			if (!isInteractive(ctx)) return;
+			// Restore last snapshot from disk for this account (stale until refresh).
+			if (s.fingerprint === null && s.snapshot === null) {
+				// fingerprint resolved during auth; attempt restore with stored rows:
+				tryRestoreSnapshot(ctx);
+			}
+			s.active = true;
+			render();
+			startHeartbeat();
+			startCountdown();
+			void refresh(ctx, true);
+		}
+
+		function tryRestoreSnapshot(ctx: CtxLike): void {
+			const ui = ctx.ui as UiLike | undefined;
+			if (!ui || !s.fingerprint) return;
+			const row = store.load(s.fingerprint);
+			if (row) {
+				s.snapshot = row.snapshot;
+				s.stale = true;
+				s.lastOkFetchAt = now();
+			}
+		}
+
+		function isStaleCtxReason(error: unknown): boolean {
+			return error instanceof Error && (error.message.includes("ctx is stale") || error.message.includes("stale after session"));
+		}
+
+		function handleAfterProviderResponse(event: { status: number; headers?: Record<string, string> }, ctx: CtxLike): void {
+			if (!isInteractive(ctx) || !s.active || s.snapshot === null) return;
+			if (event.status === 429) {
+				const ra = event.headers?.["retry-after"] ?? event.headers?.["Retry-After"];
+				if (typeof ra === "string") {
+					const wait = parseRetryAfter(ra, now());
+					s.retryDeadline = Math.max(s.retryDeadline, now() + wait);
+					s.nextAllowedAt = Math.max(s.nextAllowedAt, s.retryDeadline);
+				}
+			}
+			const update = event.headers ? parseRateLimitHeaders(event.headers, now()) : undefined;
+			if (!update) return;
+			const merged = mergeHeaderUpdate(s.snapshot, update);
+			if (merged !== s.snapshot) {
+				s.snapshot = merged;
+				scheduleResetOneShot(merged);
+				render();
+			}
+		}
+
+		// ── events ──
+		api.on("session_start", async (_event, ctx) => {
+			if (!isInteractive(ctx)) return;
+			await activate(ctx);
+		});
+		api.on("model_select", async (event, ctx) => {
+			s.generation += 1;
+			s.inFlight = false;
+			const model = (event as { model?: { provider?: string; id?: string; name?: string } }).model;
+			s.lastCtx = ctx;
+			if (!isInteractive(ctx)) return;
+			await activate(ctx, model);
+		});
+		api.on("agent_settled", async (_event, ctx) => {
+			if (!isInteractive(ctx) || !s.active) return;
+			scheduleDebouncedRefresh(ctx);
+		});
+		api.on("agent_end", async () => { /* refresh via agent_settled; countdown continues */ });
+		api.on("after_provider_response", async (event, ctx) => {
+			handleAfterProviderResponse(event as { status: number; headers?: Record<string, string> }, ctx);
+		});
+		api.on("session_shutdown", async () => {
+			s.generation += 1;
+			s.active = false;
+			clearTimers();
+			render();
+		});
+
+		// ── command ──
+		api.registerCommand("codex-usage", {
+			description: "Show ChatGPT Codex subscription usage (add --json for raw output)",
+			getArgumentCompletions: (prefix: string) => {
+				const items = [
+					{ value: "--json", label: "--json", description: "Stable JSON snapshot" },
+					{ value: "--refresh", label: "--refresh", description: "Bypass throttling" },
+					{ value: "consume", label: "consume", description: "Redeem one usage reset" },
+				];
+				const filtered = items.filter((i) => i.value.startsWith(prefix));
+				return filtered.length > 0 ? filtered : null;
+			},
+			handler: async (args, ctx) => {
+				const ui = ctx.ui as UiLike | undefined;
+				if (!ui) return;
+				try {
+					const parsed = parseCommandArgs(args);
+					if (parsed.mode === "consume") {
+						await consumeFlow(ctx, parsed);
+						return;
+					}
+					const auth = await deps.authFor(ctx, { requireActiveModel: false, wantToken: true });
+					if (auth.status !== "ok") {
+						ui.notify(auth.status === "no-auth" ? msg(lang, "authNeeded") : msg(lang, "authFailed"), "error");
+						return;
+					}
+					if (!parsed.refresh && now() < s.retryDeadline) {
+						ui.notify(msg(lang, "rateLimitedNotify"), "error");
+						return;
+					}
+					const client = deps.clientFor();
+					const result = await client.fetchSnapshot(auth.token, auth.accountId, ctxSignal(ctx));
+					if (result.status !== "ok") {
+						ui.notify(result.status === "retry" ? msg(lang, "rateLimitedNotify") : result.message || msg(lang, "fetchFailed"), "error");
+						return;
+					}
+					const snapshot = result.snapshot;
+					if (s.active && (ctx.model?.provider === PROVIDER_ID)) {
+						s.lastCtx = ctx;
+						applySnapshot(snapshot, ctx);
+						render();
+					}
+					let inventory: ResetCreditInventory | null = null;
+					try {
+						const inv = await client.listResetCredits(auth.token, auth.accountId, ctxSignal(ctx));
+						if (inv.status === "ok") inventory = inv.inventory;
+					} catch { /* report still useful without inventory */ }
+					const stale = s.active ? s.stale : false;
+					if (parsed.json) {
+						const payload = JSON.stringify(toJsonPayload(snapshot, { stale, resetInventory: inventory ?? undefined }), null, 2);
+						if (ctx.mode === "tui") {
+							await showOverlay(ctx, payload.split("\n"), msg(lang, "reportTitle"));
+						} else if (ctx.mode === "print") {
+							console.log(payload);
+						} else {
+							ui.notify(msg(lang, "jsonModeRestricted"), "warning");
+						}
+						return;
+					}
+					const lines = buildReportLines(snapshot, { now: now(), lang, stale, resetInventory: inventory ?? undefined });
+					if (ctx.mode === "tui") {
+						await showOverlay(ctx, lines, msg(lang, "reportTitle"));
+					} else {
+						const rem = remainingPercent(snapshot.buckets[0]?.primary);
+						ui.notify(msg(lang, "reportSummary", { pct: rem === null ? "?" : String(rem) }), "info");
+					}
+				} catch (error) {
+					if (isStaleCtxReason(error)) return;
+					ui.notify(error instanceof Error ? error.message : msg(lang, "fetchFailed"), "error");
+				}
+			},
+		});
+
+		async function showOverlay(ctx: CtxLike, body: string[], header: string): Promise<void> {
+			const ui = ctx.ui as UiLike | undefined;
+			if (!ui?.custom) return;
+			await ui.custom(
+				(tui, theme, kb, done) => {
+					const rowGen = () => (tui as { terminal?: { rows?: number } }).terminal?.rows ?? 24;
+					return createOverlayComponent({
+						header,
+						body,
+						footer: msg(lang, "pressClose"),
+						theme,
+						kb,
+						done,
+						rowGen,
+						lang,
+					});
+				},
+				{ overlay: true, overlayOptions: { maxHeight: "80%" } },
+			);
+		}
+
+		async function consumeFlow(ctx: CtxLike, parsed: { refresh: boolean; json: boolean; mode: "report" | "consume" }): Promise<void> {
+			const ui = ctx.ui as UiLike | undefined;
+			if (!ui) return;
+			if (ctx.mode !== "tui") {
+				ui.notify(msg(lang, "jsonModeRestricted"), "warning");
+				return;
+			}
+			const auth = await deps.authFor(ctx, { requireActiveModel: false, wantToken: true });
+			if (auth.status !== "ok") {
+				ui.notify(auth.status === "no-auth" ? msg(lang, "authNeeded") : msg(lang, "authFailed"), "error");
+				return;
+			}
+			// Guard 1+2: stored credential must match the runtime account, exactly once.
+			await deps.ensureReader?.();
+			const stored = deps.credentialReader?.(PROVIDER_ID);
+			if (!stored?.accountId || stored.accountId !== auth.accountId) {
+				ui.notify(msg(lang, "consumeRestricted"), "warning");
+				return;
+			}
+			const client = deps.clientFor();
+			const inv = await client.listResetCredits(auth.token, auth.accountId, ctxSignal(ctx));
+			if (inv.status !== "ok") {
+				ui.notify(inv.status === "retry" ? msg(lang, "rateLimitedNotify") : msg(lang, "consumeUnavailable"), "error");
+				return;
+			}
+			if (inv.inventory.availableCount === 0 || inv.inventory.options.length === 0) {
+				ui.notify(msg(lang, "consumeEmpty"), "info");
+				return;
+			}
+			const option = await ui.select?.({
+				message: msg(lang, "consumeTitle"),
+				options: inv.inventory.options.map((o, i) => ({
+					id: String(i),
+					label: o.title,
+					description: `${o.description}${o.expiresAt !== undefined ? ` · ${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })}` : ""}`,
+				})),
+			});
+			if (!option) {
+				ui.notify(msg(lang, "consumeCancelled"), "info");
+				return;
+			}
+			const chosen = inv.inventory.options[Number(option.id)];
+			if (!chosen) {
+				ui.notify(msg(lang, "consumeCancelled"), "info");
+				return;
+			}
+			// Guard 4: explicit confirmation before POST.
+			const ok = await ui.confirm?.({ message: msg(lang, "consumeConfirm", { title: chosen.title, expiry: chosen.expiresAt !== undefined ? formatReset(chosen.expiresAt, now(), lang) || "" : "" }) });
+			if (!ok) {
+				ui.notify(msg(lang, "consumeCancelled"), "info");
+				return;
+			}
+			// Guard 3: fresh redeem request id per attempt.
+			const redeemId = deps.resetIdFactory?.() ?? cryptoRandomId();
+			const outcome = await client.consumeResetCredit(auth.token, auth.accountId, { redeem_request_id: redeemId, ...(chosen.creditId ? { credit_id: chosen.creditId } : {}) }, ctxSignal(ctx));
+			if (outcome.status !== "ok") {
+				ui.notify(outcome.status === "retry" ? msg(lang, "rateLimitedNotify") : outcome.message || msg(lang, "consumeUnavailable"), "error");
+				return;
+			}
+			// Guard 5: outcome explained; snapshot refetched.
+			const copy =
+				outcome.code === "reset" ? msg(lang, "consumeReset", { windows: outcome.windowsReset })
+				: outcome.code === "nothing_to_reset" ? msg(lang, "consumeNothing")
+				: outcome.code === "no_credit" ? msg(lang, "consumeNoCredit")
+				: outcome.code === "already_redeemed" ? msg(lang, "consumeAlready")
+				: msg(lang, "consumeUnknown");
+			ui.notify(copy, "info");
+			if (s.lastCtx) void refresh(s.lastCtx, true);
+		}
+
+		function ctxSignal(ctx: CtxLike): AbortSignal | undefined {
+			return (ctx as { signal?: AbortSignal }).signal;
+		}
+
+		function cryptoRandomId(): string {
+			try {
+				return createHash("sha256").update(`${now()}-${Math.random()}`).digest("hex").slice(0, 32);
+			} catch {
+				return `${now()}-${Math.random()}`;
+			}
+		}
+	};
+}
+
+function parseCommandArgs(args: string): { refresh: boolean; json: boolean; mode: "report" | "consume" } {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	let refresh = false;
+	let json = false;
+	let mode: "report" | "consume" = "report";
+	for (const token of tokens) {
+		if (token === "--refresh") refresh = true;
+		else if (token === "--json") json = true;
+		else if (token === "consume") mode = "consume";
+		else throw new Error(`Unknown option: ${token}. Usage: /codex-usage [--json|--refresh|consume]`);
+	}
+	return { refresh, json, mode };
+}
+
+export function openaiCodexUsageInstall(pi: unknown): void {
+	const env = process.env as Record<string, string | undefined>;
+	const homedir = nodeOs.homedir();
+	let cachedReader: CredentialReader | undefined;
+	let readerPromise: Promise<void> | null = null;
+	const ensureReader = async (): Promise<void> => {
+		if (!readerPromise) {
+			readerPromise = (async () => {
+				try {
+					// Peer-dependency export Pi exposes for credential reads;
+					// older Pi versions degrade to best-effort switch detection.
+					const mod = await import("@earendil-works/pi-coding-agent") as { readStoredCredential?: (providerId: string) => StoredCodexCredential | undefined };
+					if (mod.readStoredCredential) cachedReader = (providerId) => mod.readStoredCredential?.(providerId);
+				} catch {
+					cachedReader = undefined;
+				}
+			})();
+		}
+		await readerPromise;
+	};
+	const dir = piAgentDir(env, homedir);
+	const store = createSnapshotStore(dir, {
+		readFile: (p) => {
+			try { return nodeFs.readFileSync(p, "utf8"); } catch { return null; }
+		},
+		appendFile: (p, text) => {
+			try { nodeFs.appendFileSync(p, text); } catch { /* */ }
+		},
+		writeFile: (p, text) => {
+			try { nodeFs.writeFileSync(p, text); } catch { /* */ }
+		},
+		rename: (from, to) => {
+			try { nodeFs.renameSync(from, to); } catch { /* */ }
+		},
+		mkdir: (p) => {
+			try { nodeFs.mkdirSync(p, { recursive: true }); } catch { /* */ }
+		},
+	});
+	const client = createUsageClient({ fetchImpl: fetch });
+	createExtension({
+		env,
+		clientFor: () => client,
+		authFor: async (ctx, opts) => {
+			await ensureReader();
+			return resolveCodexAuth(ctx, { credentialReader: cachedReader });
+		},
+		credentialReader: (providerId) => cachedReader?.(providerId),
+		ensureReader,
+		snapshotStore: store,
+	})(pi);
+}
+
+export default function openaiCodexUsage(pi: unknown): void {
+	openaiCodexUsageInstall(pi);
 }
