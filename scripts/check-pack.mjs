@@ -4,7 +4,7 @@
  */
 import { execFileSync } from "node:child_process";
 
-const EXPECTED = ["LICENSE", "README.md", "README.zh-CN.md", "extensions/xai-usage.ts", "package.json"];
+const EXPECTED = ["LICENSE", "README.md", "README.zh-CN.md", "extensions/openai-codex-usage.ts", "package.json"];
 
 const out = execFileSync("pnpm", ["pack", "--dry-run", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
 const parsed = JSON.parse(out);
