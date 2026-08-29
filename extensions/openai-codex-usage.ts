@@ -2427,7 +2427,12 @@ export function createExtension(deps: ExtensionDeps) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
 			}
-			const chosen = inv.inventory.options[Number(choice)];
+			// pi's select resolves the chosen OPTION STRING (interactive-mode.js);
+			// map the label back to the option.
+			const chosen = inv.inventory.options.find(
+				(o) =>
+					`${o.title}${o.expiresAt !== undefined ? ` (${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })})` : ""}` === choice,
+			);
 			if (!chosen) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;

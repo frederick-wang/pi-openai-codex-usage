@@ -110,7 +110,8 @@ export function freshCtx(mode = "tui", model?: { provider: string; id?: string; 
 			},
 			select: async (title: string, options: string[]) => {
 				log.selectCalls.push({ message: title, options: options.map((label, i) => ({ id: String(i), label })) });
-				return opts.selectId === undefined ? undefined : String(opts.selectId);
+				// Real pi resolves the chosen OPTION STRING (interactive-mode.js).
+				return opts.selectId === undefined ? undefined : options[Number(opts.selectId)];
 			},
 			confirm: async (title: string, message: string) => {
 				log.confirmCalls.push({ message: `${title} / ${message}` });
