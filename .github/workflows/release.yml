@@ -30,5 +30,13 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: Publish (OIDC trusted publishing)
+      # First published release uses the repo NPM_TOKEN secret (npm requires
+      # a token for the first package version). Once the package exists, the
+      # Trusted Publisher can be configured at https://www.npmjs.com/settings/
+      # <account>/access_grants → 删除/清空 NPM_TOKEN secret 后，发布将自动
+      # 走 OIDC trusted publishing（workflow 本身无需改动，publish 步骤两种
+      # 模式共用）。
+      - name: Publish (token now, OIDC once configured)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
