@@ -827,7 +827,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		unknownArgs: (v) => `Unknown option: ${v.arg}. Usage: /codex-usage [--json|--refresh|consume]`,
 		consumeTitle: () => "Consume a usage reset",
 		consumeEmpty: () => "No usage limit resets available.",
-		consumeConfirm: (v) => `Consume “${v.title}”${v.expiry ? ` (expires ${v.expiry})` : ""}? This cannot be undone.`,
+		consumeConfirm: (v) => `Consume “${v.title}”${v.expiry ? ` (expires ${v.expiry})` : ""}? ${v.description} This cannot be undone.`,
 		consumeCancelled: () => "Reset cancelled.",
 		consumeReset: (v) => `Usage reset. ${v.windows} window(s) reset.`,
 		consumeNothing: () => "Your usage does not need a reset right now.",
@@ -897,7 +897,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		unknownArgs: (v) => `未知选项：${v.arg}。用法：/codex-usage [--json|--refresh|consume]`,
 		consumeTitle: () => "使用一次用量重置",
 		consumeEmpty: () => "现在没有可用的用量重置。",
-		consumeConfirm: (v) => `确认用掉“${v.title}”${v.expiry ? `（${v.expiry} 过期）` : ""}？用掉就没了。`,
+		consumeConfirm: (v) => `确认用掉“${v.title}”${v.expiry ? `（${v.expiry} 过期）` : ""}？${v.description}用掉就没了。`,
 		consumeCancelled: () => "已取消。",
 		consumeReset: (v) => `重置成功，${v.windows} 个时段已重置。`,
 		consumeNothing: () => "现在的用量不需要重置。",
@@ -2417,28 +2417,33 @@ export function createExtension(deps: ExtensionDeps) {
 				ui.notify(msg(lang, "consumeEmpty"), "info");
 				return;
 			}
+			// Build the picker labels exactly once, against a single instant:
+			// ordinal prefixes keep duplicate titles distinct, and the SAME array
+			// maps the choice back by position. pi's select resolves the chosen
+			// option string verbatim; identity must never be recovered by
+			// re-rendering time-dependent label text.
+			const presentedAt = now();
+			const labels = inv.inventory.options.map((o, i) =>
+				`${i + 1}. ${o.title}${o.expiresAt !== undefined ? ` (${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, presentedAt, lang) || "?" })})` : ""}`,
+			);
 			const choice = await ui.select?.(
 				msg(lang, "consumeTitle"),
-				inv.inventory.options.map((o) =>
-					`${o.title}${o.expiresAt !== undefined ? ` (${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })})` : ""}`,
-				),
+				labels,
 			);
 			if (choice === undefined || choice === null) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
 			}
-			// pi's select resolves the chosen OPTION STRING (interactive-mode.js);
-			// map the label back to the option.
-			const chosen = inv.inventory.options.find(
-				(o) =>
-					`${o.title}${o.expiresAt !== undefined ? ` (${msg(lang, "resetOptionExpires", { at: formatReset(o.expiresAt, now(), lang) || "?" })})` : ""}` === choice,
-			);
-			if (!chosen) {
-				ui.notify(msg(lang, "consumeCancelled"), "info");
+			const chosenIndex = labels.indexOf(choice);
+			if (chosenIndex < 0) {
+				// Fail closed: a string outside the presented options is a host
+				// integration failure, not a user cancellation.
+				ui.notify(msg(lang, "consumeUnavailable"), "error");
 				return;
 			}
+			const chosen = inv.inventory.options[chosenIndex];
 			// Guard 4: explicit confirmation before POST.
-			const ok = await ui.confirm?.(msg(lang, "consumeTitle"), msg(lang, "consumeConfirm", { title: chosen.title, expiry: chosen.expiresAt !== undefined ? formatReset(chosen.expiresAt, now(), lang) || "" : "" }));
+			const ok = await ui.confirm?.(msg(lang, "consumeTitle"), msg(lang, "consumeConfirm", { title: chosen.title, description: chosen.description, expiry: chosen.expiresAt !== undefined ? formatReset(chosen.expiresAt, now(), lang) || "" : "" }));
 			if (!ok) {
 				ui.notify(msg(lang, "consumeCancelled"), "info");
 				return;
