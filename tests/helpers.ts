@@ -58,7 +58,7 @@ export function stubKb(): { matches(data: string, id: string): boolean } {
 	};
 }
 
-export function freshCtx(mode = "tui", model?: { provider: string; id?: string; name?: string; baseUrl?: string }, opts: { authApiKey?: string; authError?: boolean; selectId?: string; confirm?: boolean } = {}) {
+export function freshCtx(mode = "tui", model?: { provider: string; id?: string; name?: string; baseUrl?: string }, opts: { authApiKey?: string; authError?: boolean; selectId?: string; selectResult?: string; confirm?: boolean } = {}) {
 	const log = {
 		status: [] as Array<{ key: string; text: string | undefined }>,
 		notifications: [] as Array<{ message: string; level: string }>,
@@ -110,6 +110,8 @@ export function freshCtx(mode = "tui", model?: { provider: string; id?: string; 
 			},
 			select: async (title: string, options: string[]) => {
 				log.selectCalls.push({ message: title, options: options.map((label, i) => ({ id: String(i), label })) });
+				// selectResult simulates a host resolving a string outside the options array.
+				if (opts.selectResult !== undefined) return opts.selectResult;
 				// Real pi resolves the chosen OPTION STRING (interactive-mode.js).
 				return opts.selectId === undefined ? undefined : options[Number(opts.selectId)];
 			},
