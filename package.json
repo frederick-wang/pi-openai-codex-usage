@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-codex-usage",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ChatGPT Codex subscription usage in the pi footer — multi-bucket limits, reset credits, consume action, /codex-usage report. Unofficial, not affiliated with OpenAI.",
   "type": "module",
   "license": "MIT",
